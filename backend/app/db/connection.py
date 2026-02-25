@@ -8,10 +8,11 @@ Provides:
 """
 
 import logging
-import os
 from typing import Optional
 
 import asyncpg
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +22,7 @@ _pool: Optional[asyncpg.Pool] = None
 async def init_db_pool() -> asyncpg.Pool:
     """Initialize the global asyncpg connection pool."""
     global _pool
-    database_url = os.environ.get("DATABASE_URL")
-    if not database_url:
-        raise RuntimeError("DATABASE_URL environment variable is not set.")
+    database_url = settings.DATABASE_URL
 
     _pool = await asyncpg.create_pool(
         dsn=database_url,

@@ -4,6 +4,7 @@ import { useRef, useEffect } from "react";
 import MessageList from "./MessageList";
 import InputBar from "./InputBar";
 import { useChat } from "@/hooks/useChat";
+import { useTTS } from "@/hooks/useTTS";
 
 interface ChatPanelProps {
   unitId: string;
@@ -17,6 +18,7 @@ export default function ChatPanel({ unitId, level, textbookId }: ChatPanelProps)
     level,
     textbookId,
   });
+  const { speak, volume, setVolume } = useTTS();
 
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -32,7 +34,7 @@ export default function ChatPanel({ unitId, level, textbookId }: ChatPanelProps)
             이 단원에 대해 무엇이든 질문해보세요.
           </div>
         ) : (
-          <MessageList messages={messages} />
+          <MessageList messages={messages} speak={speak} />
         )}
         <div ref={bottomRef} />
       </div>
@@ -40,6 +42,8 @@ export default function ChatPanel({ unitId, level, textbookId }: ChatPanelProps)
         onSend={sendMessage}
         isStreaming={isStreaming}
         queueSize={queueSize}
+        volume={volume}
+        onVolumeChange={setVolume}
       />
     </div>
   );

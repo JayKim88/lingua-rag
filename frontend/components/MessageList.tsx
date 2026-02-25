@@ -5,9 +5,10 @@ import ReactMarkdown from "react-markdown";
 
 interface MessageListProps {
   messages: Message[];
+  speak: (text: string) => void;
 }
 
-export default function MessageList({ messages }: MessageListProps) {
+export default function MessageList({ messages, speak }: MessageListProps) {
   return (
     <div className="space-y-4">
       {messages.map((msg) => (
@@ -26,7 +27,25 @@ export default function MessageList({ messages }: MessageListProps) {
               <p className="whitespace-pre-wrap">{msg.content}</p>
             ) : (
               <div className="prose prose-sm max-w-none prose-headings:text-gray-800 prose-strong:text-gray-900">
-                <ReactMarkdown>{msg.content}</ReactMarkdown>
+                <ReactMarkdown
+                  components={{
+                    strong: ({ children }) => {
+                      const text = String(children);
+                      return (
+                        <button
+                          onClick={() => speak(text)}
+                          className="font-bold text-blue-700 hover:text-blue-900 inline-flex items-center gap-0.5 cursor-pointer hover:underline"
+                          title={`"${text}" 발음 듣기`}
+                        >
+                          {children}
+                          <span className="text-[10px] opacity-50 ml-0.5">🔊</span>
+                        </button>
+                      );
+                    },
+                  }}
+                >
+                  {msg.content}
+                </ReactMarkdown>
                 {msg.isStreaming && (
                   <span className="inline-block w-1.5 h-4 bg-gray-400 animate-pulse ml-0.5 align-middle" />
                 )}

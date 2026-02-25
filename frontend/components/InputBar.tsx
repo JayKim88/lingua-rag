@@ -6,9 +6,11 @@ interface InputBarProps {
   onSend: (message: string) => void;
   isStreaming: boolean;
   queueSize: number;
+  volume: number;
+  onVolumeChange: (v: number) => void;
 }
 
-export default function InputBar({ onSend, isStreaming, queueSize }: InputBarProps) {
+export default function InputBar({ onSend, isStreaming, queueSize, volume, onVolumeChange }: InputBarProps) {
   const [value, setValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -43,6 +45,22 @@ export default function InputBar({ onSend, isStreaming, queueSize }: InputBarPro
           {queueSize}개 대기 중
         </p>
       )}
+      <div className="flex items-center justify-end gap-2 max-w-3xl mx-auto mb-2 text-gray-400">
+        <svg className="w-3.5 h-3.5 shrink-0" fill="currentColor" viewBox="0 0 24 24">
+          <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z" />
+        </svg>
+        <input
+          type="range"
+          min="0"
+          max="1"
+          step="0.05"
+          value={volume}
+          onChange={(e) => onVolumeChange(Number(e.target.value))}
+          className="w-20 h-1 accent-blue-500 cursor-pointer"
+          title={`발음 볼륨: ${Math.round(volume * 100)}%`}
+        />
+        <span className="text-xs w-7 text-right">{Math.round(volume * 100)}%</span>
+      </div>
       <div className="flex items-end gap-2 max-w-3xl mx-auto">
         <textarea
           ref={textareaRef}
