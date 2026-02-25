@@ -1,0 +1,1 @@
+"""Static data: units, prompts, level configs."""
