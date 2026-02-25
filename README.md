@@ -2,6 +2,145 @@
 
 독독독 A1 독일어 교재 기반 AI 튜터 앱. 단원을 선택하면 Claude가 해당 단원의 문법과 어휘를 실시간 스트리밍으로 설명합니다.
 
+## 아키텍처
+
+### 시스템 구성
+
+```mermaid
+graph TB
+    subgraph Browser["브라우저"]
+        UI["채팅 UI\n(React Components)"]
+        Hook["useChat Hook\n(SSE 수신 · 메시지 큐)"]
+    end
+
+    subgraph Vercel["Vercel (Frontend)"]
+        Next["Next.js 15\nApp Router"]
+        Proxy["API Route Proxy\n/app/api/chat/route.ts\n쿠키 포워딩"]
+    end
+
+    subgraph Railway["Railway (Backend)"]
+        FastAPI["FastAPI\n(uvicorn · asyncpg)"]
+        subgraph Services["Services"]
+            SessionSvc["SessionService\n쿠키 → 세션 UUID"]
+            ClaudeSvc["ClaudeService\nSSE 스트리밍 · 3회 재시도"]
+        end
+        subgraph Routers["Routers"]
+            ChatRouter["POST /api/chat"]
+            ConvRouter["GET /api/conversations"]
+            HealthRouter["GET /api/health"]
+        end
+        Lock["asyncio.Lock\n(LRU · 1,000 세션 캡)\n동시 요청 직렬화"]
+    end
+
+    subgraph DB["Railway PostgreSQL"]
+        Sessions["sessions"]
+        Conversations["conversations"]
+        Messages["messages"]
+    end
+
+    Claude["Claude claude-sonnet-4-6\n(Anthropic API)"]
+
+    UI <-->|"SSE stream\nhttponly cookie"| Hook
+    Hook <-->|"fetch POST /api/chat"| Next
+    Next --> Proxy
+    Proxy <-->|"쿠키 포워딩\nSet-Cookie 반환"| FastAPI
+    FastAPI --> ChatRouter
+    ChatRouter --> SessionSvc
+    ChatRouter --> Lock
+    ChatRouter --> ClaudeSvc
+    SessionSvc <--> Sessions
+    ChatRouter <--> Conversations
+    ChatRouter <--> Messages
+    ClaudeSvc <-->|"Streaming API"| Claude
+```
+
+### SSE 채팅 요청 흐름
+
+```mermaid
+sequenceDiagram
+    actor User as 사용자
+    participant UI as 채팅 UI
+    participant Hook as useChat Hook
+    participant Proxy as Next.js Proxy<br/>/api/chat/route.ts
+    participant API as FastAPI<br/>/api/chat
+    participant DB as PostgreSQL
+    participant LLM as Claude API
+
+    User->>UI: 메시지 입력 후 전송
+    UI->>Hook: sendMessage(content)
+
+    alt 스트리밍 중
+        Hook->>Hook: 큐에 추가 (queueSize++)
+    else 대기 중
+        Hook->>Proxy: POST /api/chat<br/>{message, unit_id, level}<br/>+ Cookie 헤더
+        Proxy->>API: POST /api/chat<br/>쿠키 포워딩
+        API->>DB: 세션 조회/생성 (sessions)
+        API->>DB: 대화 조회/생성 (conversations)
+        API->>API: session_lock 획득
+        API->>DB: 최근 10개 메시지 조회 (history)
+        API->>DB: user 메시지 저장 (messages)
+
+        API->>LLM: streaming API 호출<br/>(system prompt + history + message)
+
+        loop SSE 스트리밍
+            LLM-->>API: text chunk
+            API-->>Proxy: data: {"type":"token","content":"..."}
+            Proxy-->>Hook: SSE 이벤트
+            Hook->>UI: 실시간 메시지 업데이트
+        end
+
+        alt max_tokens 도달
+            API-->>Hook: data: {"type":"truncated"}
+            Hook->>UI: ⚠ 응답이 잘렸습니다 표시
+        end
+
+        API->>DB: assistant 메시지 저장 (messages)
+        API-->>Hook: data: {"type":"done",...}
+        API-->>Hook: data: [DONE]
+        API->>API: session_lock 해제
+
+        alt Set-Cookie 반환
+            API-->>Proxy: Set-Cookie: lingua_session=...
+            Proxy-->>Hook: Set-Cookie 포워딩
+        end
+
+        Hook->>Hook: 큐에 다음 메시지 있으면 처리
+    end
+```
+
+### DB 스키마
+
+```mermaid
+erDiagram
+    sessions {
+        UUID id PK
+        TIMESTAMPTZ created_at
+        TIMESTAMPTZ last_active_at
+    }
+
+    conversations {
+        UUID id PK
+        UUID session_id FK
+        VARCHAR unit_id
+        VARCHAR textbook_id
+        VARCHAR level
+        TIMESTAMPTZ created_at
+        TIMESTAMPTZ updated_at
+    }
+
+    messages {
+        UUID id PK
+        UUID conversation_id FK
+        VARCHAR role
+        TEXT content
+        INTEGER token_count
+        TIMESTAMPTZ created_at
+    }
+
+    sessions ||--o{ conversations : "1 세션 : N 대화"
+    conversations ||--o{ messages : "1 대화 : N 메시지"
+```
+
 ## 기술 스택
 
 | 레이어 | 기술 |
