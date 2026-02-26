@@ -152,7 +152,7 @@ A1 범위에서 도움이 필요하시면 언제든지 질문해주세요! 🙂"
 
 ### NFR-3: 신뢰성
 
-- Fly.io 배포 기준 99% uptime 목표 (단일 서버, 무료 티어 한계 인정)
+- Render 배포 기준 99% uptime 목표 (단일 서버, 무료 티어 한계 인정)
 
 ---
 
@@ -597,50 +597,26 @@ def test_history_truncation_to_10():
 
 ---
 
-## 10. Implementation Checklist (Week 1-2)
+## 10. Implementation Checklist (Frozen)
 
-### Week 1 — FastAPI + Streaming 백엔드
-
-- [ ] FastAPI 프로젝트 셋업 (`pyproject.toml`, `.venv`)
-- [ ] `POST /api/chat` SSE Streaming 엔드포인트
-- [ ] `build_system_prompt()` 함수 구현
-- [ ] `DOKDOKDOK_A1` 데이터 + `UNIT_SUMMARY_TABLE` 상수 정의
-- [ ] `LEVEL_CONFIG` (A1/A2) 구현
-- [ ] 에러 처리 + exponential backoff 재시도 (3회, 1s→2s→4s)
-- [ ] Fly.io 배포 + `GET /api/health` 동작 확인
-
-### Week 2 — DB + 히스토리 + 세션
-
-- [ ] PostgreSQL 스키마 생성 (`sessions`, `conversations`, `messages`)
-- [ ] 세션 쿠키 미들웨어 (`GET /api/session`)
-- [ ] `GET/POST /api/conversations` 구현
-- [ ] 히스토리 조회 (최근 10개 메시지)
-- [ ] Next.js `useChat` 훅 구현 (SSE 소비 + 큐잉)
-- [ ] "1개 대기 중" 배지 UI
+> **Note**: 이 체크리스트는 설계 시점 스냅샷입니다. 실제 진행 상황은 `wrap-up/lingua-rag.md`에서 관리합니다.
 
 ---
 
 ## 11. Open Questions
 
-| # | 질문 | 결정 시점 |
-|---|------|----------|
-| OQ-1 | 세션 쿠키 만료 기간? (7일? 30일?) | Week 1 |
-| OQ-2 | Fly.io 무료 티어 PostgreSQL + FastAPI 동시 운영 가능 여부 | Week 1 |
-| OQ-3 | `UNIT_SUMMARY_TABLE` 56개 단원 전체 → ~1,200 token. 실제 claude-sonnet-4-6 비용에서 허용 가능한 수준인지 확인 | Week 2 |
-| OQ-4 | max_tokens 1,024 → 복잡한 문법 설명 시 잘리는 케이스 발생 여부 | Week 1 테스트 |
+> Open Questions는 `wrap-up/lingua-rag.md`에서 통합 관리합니다.
 
 ---
 
 ## 12. References
 
-- [Product Brief](../product-brief-lingua-rag-v01-20260225.md) — F1 원래 기술
-- [PROJECT_BRIEF.md](../PROJECT_BRIEF.md) — 전체 기술 아키텍처
+- [PRD](./prd.md) — 제품 전략 + 경쟁 분석
+- [User Journey Map](./user-journey-map.md) — 사용자 여정
+- [Wireframe Spec](./wireframe-spec.md) — UI 화면 설계
 - [Anthropic Streaming Docs](https://docs.anthropic.com/en/api/messages-streaming)
 - [FastAPI StreamingResponse](https://fastapi.tiangolo.com/advanced/custom-response/#streamingresponse)
 
 ---
 
-**Next Steps:**
-1. [ ] OQ-1, OQ-4 Week 1 시작 전 결정
-2. [ ] `build_system_prompt()` 프로토타입으로 10개 질문 테스트
-3. [ ] competitive-agents에게 F1 구현 의뢰 (이 스펙 기반)
+**Next Steps**: `wrap-up/lingua-rag.md` 참조
