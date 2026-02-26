@@ -64,26 +64,31 @@
 
 ---
 
-## ADR-004: 배포 플랫폼 (Vercel + Railway)
+## ADR-004: 배포 플랫폼 (Vercel + Render)
 
 **날짜**: 2026-02-25
-**상태**: 채택
+**상태**: 채택 (Railway → Render 변경: 2026-02-26)
 
-**결정**: Next.js → Vercel, FastAPI + PostgreSQL → Railway
+**결정**: Next.js → Vercel, FastAPI + PostgreSQL → Render
 
 **이유**:
 - Next.js는 Vercel 네이티브 최적화 (Jay 기존 강점 활용)
-- Railway: GitHub 연동 → `git push`만으로 자동 배포. 설정 파일 불필요
-- PostgreSQL Railway 내장 → 별도 DB 서비스 불필요 (v0.1 기준)
-- Week 1 live URL 확보 속도 가장 빠름
+- Render: 완전 무료 티어 제공 (신용카드 불필요)
+- PostgreSQL Render 내장 → 별도 DB 서비스 불필요 (v0.1 기준)
+- Dockerfile 기반 배포 → GitHub 연동 자동 배포
+
+**변경 이유 (Railway → Render)**:
+- Railway: 30일 무료 후 월 $1 + 사용량 과금
+- Render: 완전 무료 (PostgreSQL 90일 제한, 재생성 가능)
+- v0.1 포트폴리오/베타 테스트 목적으로는 Render가 적합
 
 **트레이드오프**:
 - 두 서비스 관리 → CORS 설정 필요 (FastAPI ↔ Next.js)
-- Railway 도쿄 리전 없음 (US/EU만) → 한국 유저 레이턴시 다소 높을 수 있음
-- Railway 무료 크레딧 $5/월 소진 시 유료 전환
+- Render 무료 티어 cold start ~30초 (15분 비활성 시 슬립)
+- PostgreSQL 90일 후 만료 → 재생성 또는 Supabase 이전 필요
 
 **v0.2 전환 계획**:
-- DB만 Railway PostgreSQL → Supabase로 이전 (pgvector 공식 지원 + v0.3 Auth 무료 포함)
+- DB만 Render PostgreSQL → Supabase로 이전 (pgvector 공식 지원 + v0.3 Auth 무료 포함)
 - FastAPI, Next.js 배포는 그대로 유지
 
 ---

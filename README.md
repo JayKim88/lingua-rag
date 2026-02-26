@@ -18,7 +18,7 @@ graph TB
         Proxy["API Route Proxy\n/app/api/chat/route.ts\n쿠키 포워딩"]
     end
 
-    subgraph Railway["Railway (Backend)"]
+    subgraph Render["Render (Backend)"]
         FastAPI["FastAPI\n(uvicorn · asyncpg)"]
         subgraph Services["Services"]
             SessionSvc["SessionService\n쿠키 → 세션 UUID"]
@@ -32,7 +32,7 @@ graph TB
         Lock["asyncio.Lock\n(LRU · 1,000 세션 캡)\n동시 요청 직렬화"]
     end
 
-    subgraph DB["Railway PostgreSQL"]
+    subgraph DB["Render PostgreSQL"]
         Sessions["sessions"]
         Conversations["conversations"]
         Messages["messages"]
@@ -149,7 +149,7 @@ erDiagram
 | Backend | FastAPI, Python 3.11, asyncpg |
 | AI | Claude claude-sonnet-4-6 (Anthropic SSE Streaming) |
 | DB | PostgreSQL (pgcrypto, asyncpg) |
-| Deploy | Vercel (Frontend) + Railway (Backend + DB) |
+| Deploy | Vercel (Frontend) + Render (Backend + DB) |
 
 ## 프로젝트 구조
 
@@ -166,7 +166,7 @@ lingua-rag/
 │   │   └── main.py        # FastAPI 앱, CORS, lifespan
 │   ├── schema.sql          # DB 초기화 스크립트
 │   ├── requirements.txt
-│   ├── Dockerfile          # Railway 배포용
+│   ├── Dockerfile          # Render 배포용
 │   └── .env.example
 └── frontend/
     ├── app/               # Next.js App Router
@@ -193,7 +193,7 @@ data: [DONE]                                      # 스트림 종료
 
 - Python 3.11+
 - Node.js 20+
-- PostgreSQL (로컬 또는 Railway)
+- PostgreSQL (로컬 또는 Render)
 - Anthropic API 키
 
 ### Backend
@@ -250,18 +250,23 @@ FRONTEND_URL=https://my-app.vercel.app,https://*.vercel.app
 
 ## 배포
 
-### Railway (Backend)
+### Render (Backend)
 
-1. Railway에서 새 프로젝트 생성 → GitHub 리포 연결
-2. PostgreSQL 플러그인 추가 → `DATABASE_URL` 자동 주입
-3. 환경 변수 설정: `ANTHROPIC_API_KEY`, `FRONTEND_URL`
-4. `backend/schema.sql`을 Railway DB에 실행
+1. Render에서 **Web Service** 생성 → GitHub `JayKim88/lingua-rag` 연결
+2. Root Directory: `backend`, Runtime: **Docker**
+3. **PostgreSQL** 추가 (Free 티어) → Internal Database URL 복사
+4. 환경 변수 설정:
+   - `DATABASE_URL` = PostgreSQL Internal URL
+   - `ANTHROPIC_API_KEY` = API 키
+   - `FRONTEND_URL` = Vercel 배포 URL
+   - `ENVIRONMENT` = `production`
+5. PostgreSQL Shell에서 `schema.sql` 실행
 
 ### Vercel (Frontend)
 
 1. Vercel에서 새 프로젝트 → GitHub 리포 연결
 2. Root Directory: `frontend`
-3. 환경 변수: `BACKEND_URL=<Railway 백엔드 URL>`
+3. 환경 변수: `BACKEND_URL=<Render 백엔드 URL>`
 
 ## API 엔드포인트
 
