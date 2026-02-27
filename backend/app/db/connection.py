@@ -42,10 +42,11 @@ async def init_db_pool() -> asyncpg.Pool:
         min_size=1,
         max_size=10,
         command_timeout=30,
-        timeout=20.0,  # per-connection timeout; default can be too tight on Render cold start
+        timeout=60.0,  # per-connection timeout; increased for Render cold start + Supabase SSL
+        max_inactive_connection_lifetime=300,  # recycle idle connections every 5 min before they go stale
         ssl=ssl,
     )
-    logger.info("asyncpg pool created (min=2, max=10, ssl=%s).", ssl)
+    logger.info("asyncpg pool created (min=1, max=10, ssl=%s).", ssl)
     return _pool
 
 

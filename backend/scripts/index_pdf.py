@@ -42,14 +42,82 @@ CHUNK_OVERLAP_CHARS = 200    # overlap between adjacent chunks
 EMBED_BATCH_SIZE = 20        # OpenAI allows up to 2048 inputs per request
 EMBED_MODEL = "text-embedding-3-small"
 
+# Pages before this number are cover/TOC/intro — skip unit detection.
+LESSON_START_PAGE = 10
+
+# Pages from this number onward are appendix (answer key, listening scripts).
+# They are not lesson content and should not be indexed under the last unit.
+LESSON_END_PAGE = 178
+
+# Maximum allowed jump in unit number between two consecutive detections.
+# Lessons appear in order (1→2→3…), so a jump of >5 is almost certainly a
+# page-number false positive.  A value of 5 tolerates up to 4 missed headers
+# while still rejecting large jumps like "1 → 11" or "17 → 56".
+MAX_UNIT_STEP = 5
+
 # Unit ID patterns to detect in PDF text.
-# Matches: "Einheit 1", "Lektion 3", "Kapitel 2", etc.
-UNIT_HEADER_PATTERNS = [
+#
+# 독독독 A1 lesson pages use the format:
+#   "18                기간을 묻는 의문문 Wie lange ~"
+#   (lesson number + large gap + Korean title, NO "강" character)
+#
+# TOC pages use "1강  알파벳과..." format — the "강" distinguishes them
+# from lesson headers, so the KO pattern safely ignores TOC pages.
+#
+# German patterns kept as fallback for non-Korean textbooks.
+UNIT_HEADER_PATTERNS_KO = [
+    # Format A: number + large gap + title on same line (10+ spaces required).
+    #   "18                기간을 묻는 의문문 Wie lange ~"
+    #   "35               W-의문문 만들기"  ← title may start with a Latin char
+    # Page footers ("10\nZusammen A1") are NOT a risk here because the page
+    # number stands alone on its own line with nothing after it on that line.
+    re.compile(r"(?:^|\n)\s{0,6}(\d{1,2})[ \t]{10,}\S"),
+    # Format B: number alone on its own line, title on next indented line.
+    #   "36\n                 의지와 바람을 나타내는\n                 화법조동사..."
+    # Require Korean first char to exclude page footers:
+    #   "11\n    Zusammen A1"  →  "Z" is Latin → no match.
+    re.compile(r"(?:^|\n)\s{0,6}(\d{1,2})[ \t]*\n[ \t]{15,}[\uAC00-\uD7A3]"),
+]
+
+UNIT_HEADER_PATTERNS_DE = [
     re.compile(r"Einheit\s+(\d+)", re.IGNORECASE),
     re.compile(r"Lektion\s+(\d+)", re.IGNORECASE),
     re.compile(r"Kapitel\s+(\d+)", re.IGNORECASE),
     re.compile(r"Unit\s+(\d+)", re.IGNORECASE),
 ]
+
+# ---------------------------------------------------------------------------
+# Noise filtering
+# ---------------------------------------------------------------------------
+
+# Minimum characters a chunk must contain to be indexed.
+MIN_CHUNK_CHARS = 60
+
+# Lines/chunks containing any of these substrings are stripped or discarded.
+# Used in two places:
+#   1. build_chunks — strips matching LINES from page text before chunking.
+#   2. is_noise_chunk — discards any chunk whose content still contains these
+#      (safety net in case a phrase spans a line-break).
+SKIP_IF_CONTAINS = [
+    "저작권법에 의해 보호",        # copyright notice (page header)
+    "무단 전재와 복제를 금합니다",  # copyright notice variant
+    "무단전재와 복제를 금합니다",   # copyright notice no-space variant
+    "All rights reserved",
+    "License Number",              # per-user watermark (footer)
+    "Zusammen A1",                 # book title in page footer
+    "독독독 독일어",                # brand name in page footer
+]
+
+
+def is_noise_chunk(text: str) -> bool:
+    """Return True if the chunk should be skipped (boilerplate / too short)."""
+    if len(text) < MIN_CHUNK_CHARS:
+        return True
+    for phrase in SKIP_IF_CONTAINS:
+        if phrase in text:
+            return True
+    return False
+
 
 
 # ---------------------------------------------------------------------------
@@ -96,12 +164,24 @@ def extract_pages(pdf_path: str) -> list[dict]:
 
 def detect_unit_id(text: str, textbook_id: str) -> str | None:
     """
-    Try to find a unit header in text (e.g. "Einheit 3").
+    Try to find a unit header in text.
+
+    For dokdokdok-a1: matches Korean "강" format (e.g. "1강", "15강").
+    Unit numbers 1-56 map directly to A1-1 through A1-56.
+
+    Falls back to German patterns (Einheit/Lektion) for other textbooks.
     Returns unit_id like "A1-3" if found, else None.
     """
-    if textbook_id != "dokdokdok-a1":
+    if textbook_id == "dokdokdok-a1":
+        for pattern in UNIT_HEADER_PATTERNS_KO:
+            m = pattern.search(text)
+            if m:
+                unit_num = int(m.group(1))
+                if 1 <= unit_num <= 56:
+                    return f"A1-{unit_num}"
         return None
-    for pattern in UNIT_HEADER_PATTERNS:
+
+    for pattern in UNIT_HEADER_PATTERNS_DE:
         m = pattern.search(text)
         if m:
             unit_num = int(m.group(1))
@@ -165,6 +245,7 @@ def build_chunks(pages: list[dict], textbook_id: str) -> list[dict]:
     """
     logger.info("build_chunks: entered, pages=%d", len(pages))
     current_unit_id: str | None = None
+    current_unit_num: int = 0   # highest accepted unit number (for step-guard)
     chunk_records = []
     chunk_index = 0
 
@@ -176,17 +257,52 @@ def build_chunks(pages: list[dict], textbook_id: str) -> list[dict]:
         page_num = page_data["page"]
         text = page_data["text"]
 
-        # Detect if this page starts a new unit
-        detected = detect_unit_id(text, textbook_id)
-        if detected:
-            current_unit_id = detected
-            logger.info("  Page %d: detected unit %s", page_num, current_unit_id)
+        # Strip boilerplate/copyright lines from page text before chunking or
+        # unit detection.  The licensed PDF watermarks every page with copyright
+        # notices; without this step those lines pollute the first chunk of each
+        # page and cause the noise filter to discard ~70% of content.
+        text = "\n".join(
+            line for line in text.split("\n")
+            if not any(phrase in line for phrase in SKIP_IF_CONTAINS)
+        )
+
+        # Detect if this page starts a new unit.
+        # Skip early pages (cover / TOC / answer-key) — they contain bare numbers
+        # in layouts that can false-match our patterns.
+        if page_num >= LESSON_START_PAGE:
+            detected = detect_unit_id(text, textbook_id)
+            if detected:
+                detected_num = int(detected.split("-")[1])
+                # For dokdokdok-a1: accept only if the unit number advances by a
+                # small step forward.  This rejects page-number false positives
+                # (e.g. page 11 matching A1-11 while still on lesson 1) while
+                # allowing the rare case of up to MAX_UNIT_STEP-1 missed headers.
+                valid = (
+                    textbook_id != "dokdokdok-a1"
+                    or (
+                        detected_num > current_unit_num
+                        and detected_num <= current_unit_num + MAX_UNIT_STEP
+                    )
+                )
+                if valid:
+                    current_unit_id = detected
+                    current_unit_num = detected_num
+                    logger.info("  Page %d: detected unit %s", page_num, current_unit_id)
 
         if idx % 40 == 0:
             logger.info("  Chunking page %d/%d...", idx, total)
 
+        # Skip appendix pages (answer key, listening scripts) — they are not
+        # lesson content.  Chunks here would be indexed under the last unit.
+        if page_num >= LESSON_END_PAGE:
+            continue
+
         chunks = chunk_text(text, CHUNK_SIZE_CHARS, CHUNK_OVERLAP_CHARS)
+        skipped = 0
         for chunk in chunks:
+            if is_noise_chunk(chunk):
+                skipped += 1
+                continue
             chunk_records.append(
                 {
                     "textbook_id": textbook_id,
@@ -197,6 +313,8 @@ def build_chunks(pages: list[dict], textbook_id: str) -> list[dict]:
                 }
             )
             chunk_index += 1
+        if skipped:
+            logger.info("  Page %d: skipped %d noise chunk(s)", page_num, skipped)
 
     logger.info("Built %d chunks (unit_id assigned: %d)",
                 len(chunk_records),
