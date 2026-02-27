@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
 INITIAL_BACKOFF = 1.0  # seconds
-MAX_TOKENS = 1024
+MAX_TOKENS = 2048
 
 
 class ClaudeService:
