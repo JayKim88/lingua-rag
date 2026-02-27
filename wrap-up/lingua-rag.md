@@ -24,7 +24,7 @@
 | Render cold start 대응 | Done | 워밍업 배너 + useBackendHealth hook |
 | 배포 (Render + Vercel) | Done | 백엔드 + DB: Render, 프론트: Vercel |
 | max_tokens 잘림 (OQ-4) | Done | 1024 → 2048 상향, truncation 안내 개선 |
-| 테스트 (pytest) | **TODO** | f1-spec Section 9 시나리오 + acceptance criteria |
+| 테스트 (pytest) | Done | f1-spec Section 9 시나리오 29/29 통과 |
 
 ### v0.2 — RAG + PDF 벡터 검색 (미착수)
 
@@ -38,18 +38,18 @@
 ### v0.3 — 품질 + 인증 (미착수)
 
 - [ ] LLM-as-judge 포맷 검증
-- [ ] 사용자 인증/Auth (Supabase Auth)
+- [x] 사용자 인증/Auth (Supabase Auth) — Google OAuth + JWT ES256 완료
 
 ### Open Questions
 
 | # | 질문 | 상태 | 출처 |
 |---|------|------|------|
-| OQ-1 | 세션 쿠키 만료 기간? (7일? 30일?) | 미결정 | f1-spec |
+| OQ-1 | 세션 쿠키 만료 기간? (7일? 30일?) | **해소** — JWT 기반으로 전환, 쿠키 세션 폐기 | f1-spec |
 | OQ-2 | Render PostgreSQL 90일 후 전략 | **해소** — Supabase 이전 완료 | decisions.md |
 | OQ-3 | 56개 단원 요약 ~1,200 token 비용 허용 여부 | 확인 필요 (~$0.02/질문 OK) | f1-spec |
 | OQ-4 | max_tokens 1,024 → 긴 문법 설명 잘림 여부 | 테스트 필요 | f1-spec |
 | OQ-5 | 독독독 저작권 확인 | 미확인 | — |
-| OQ-6 | 다중 기기 시나리오 (세션 쿠키 한계) | 미검토 | — |
+| OQ-6 | 다중 기기 시나리오 (세션 쿠키 한계) | **해소** — user_id 기반 히스토리로 전환, 동일 Google 계정으로 다기기 공유 가능 | — |
 
 ### UX 미결정 사항
 
@@ -67,6 +67,42 @@
 | TAM: 독일어 학습 시장 규모 조사 | 미착수 | prd.md |
 | GTM: 콘텐츠 마케팅 채널·전략 수립 | 미착수 | prd.md |
 | Pricing: 가격 모델 검토 | 미착수 | prd.md |
+
+---
+
+## Session: 2026-02-27 16:04
+
+> **Context**: Google OAuth 로그인 구현 (Supabase Auth), JWT ES256 검증, 사이드바 유저 카드 UI, Vercel 배포 완료
+
+### Done
+- feat(auth): Google OAuth 로그인 구현 — Supabase Auth + `@supabase/ssr`, middleware 라우트 보호
+- feat(auth): `deps/auth.py` — PyJWT JWKS 클라이언트로 ES256 토큰 검증 (`cryptography` + `certifi`)
+- feat(db): `sessions` 테이블 삭제, `conversations.user_id` (auth.users.id) 로 교체
+- feat(backend): `get_current_user` Depends — `HTTPBearer` + JWKS 기반 UUID 추출
+- feat(frontend): `lib/supabase/{client,server}.ts`, `middleware.ts`, `app/login/page.tsx`, `app/auth/callback/route.ts` 신규
+- feat(frontend): API proxy 3개 — `lingua_session` 쿠키 → `Authorization: Bearer` 헤더로 전환
+- feat(frontend): 사이드바 하단 유저 카드 — 이니셜 아바타 + 이름 표시, 클릭 시 팝오버 (이메일 + 로그아웃)
+- fix(auth): Supabase 신규 프로젝트 JWT 알고리즘 HS256 → ES256 — JWKS endpoint + `PyJWKClient` 전환
+- fix(auth): macOS Python 3.13 SSL 인증서 미포함 — `certifi` CA bundle을 JWKS 클라이언트에 명시 주입
+- fix(deploy): `middleware.ts` Next.js 15 타입 오류 — `request.cookies.set(name, value, options)` → `(name, value)`
+- fix(deploy): `frontend/app/setup/page.tsx` 최초 커밋 누락 → 404 해소
+- chore(deps): `requirements.txt` — `cryptography>=43.0.0`, `certifi>=2024.0.0` 추가
+
+### Decisions
+- **Supabase Auth 선택**: 이미 Supabase DB 사용 중 → 추가 서비스 없이 동일 플랫폼에서 Google OAuth 제공
+- **JWKS/ES256**: Supabase 신규 프로젝트는 HS256 대신 ES256 사용. 환경변수 `SUPABASE_JWT_SECRET` 제거, `SUPABASE_URL`로 JWKS 엔드포인트 구성
+- **certifi 명시 주입**: macOS Python.org 인스톨러는 시스템 keychain 미사용 → `urllib` HTTPS 실패. `certifi.where()`로 CA bundle 명시. Render(Linux)에서는 불필요하나 동일 코드로 동작
+- **세션 쿠키 완전 제거**: `lingua_session` httponly 쿠키 → Supabase JWT Bearer 토큰. OQ-1(만료 기간), OQ-6(다기기) 모두 해소
+
+### Issues
+- **JWT alg 불일치 (401)**: `deps/auth.py`가 HS256으로 디코드 → Supabase ES256 토큰 검증 실패. 토큰 헤더 디코딩으로 원인 확인 후 JWKS 방식으로 교체
+- **SSL CERTIFICATE_VERIFY_FAILED**: macOS Python 3.13 venv에서 JWKS URL fetch 실패. `certifi` 미설치 확인 후 `.venv/bin/pip install certifi`로 해결
+- **Vercel 빌드 실패 1**: `middleware.ts` TypeScript 오류 — `RequestCookies.set()`은 Next.js 15에서 options 3번째 인자 불허
+- **Vercel 빌드 실패 2**: `frontend/app/setup/page.tsx` 미추적 파일로 커밋 누락 → `/setup?level=A1` 404
+
+### Next
+- [ ] 프로덕션 E2E 검증 — Render 백엔드 재배포 확인, Google 로그인 → 채팅 → 히스토리 공유 (다기기)
+- [ ] v0.2 RAG 착수 — 임베딩 모델 선택 (ADR-003), PDF 파싱 파이프라인, pgvector 벡터 검색
 
 ---
 
