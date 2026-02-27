@@ -6,6 +6,39 @@
 
 ---
 
+## Session: 2026-02-27 20:14
+
+> **Context**: RAG 인덱싱 품질 개선 — 단원 감지 정확도 100%, 부록 제거, 단원명 교정 후 배포
+
+### Done
+- fix(rag): `index_pdf.py` 한국어 단원 헤더 패턴 재작성
+  - Format A: `r"(?:^|\n)\s{0,6}(\d{1,2})[ \t]{10,}\S"` (10+ spaces)
+  - Format B: `r"(?:^|\n)\s{0,6}(\d{1,2})[ \t]*\n[ \t]{15,}[\uAC00-\uD7A3]"` (15+ spaces + Korean)
+- fix(rag): `LESSON_START_PAGE=10` — TOC/표지 페이지(1-9) 단원 감지 스킵
+- fix(rag): `LESSON_END_PAGE=178` — 부록/정답지 페이지(178+) 청킹 제외
+- fix(rag): `MAX_UNIT_STEP=5` — 페이지 번호 오탐 방지 (단조 증가 스텝 가드)
+- fix(rag): 저작권 watermark 줄 사전 제거 (`SKIP_IF_CONTAINS` 라인 레벨 필터링)
+  - 추가된 항목: "License Number", "Zusammen A1", "독독독 독일어"
+- feat(data): `units.py` + `types.ts` — 56단원 제목/밴드명 실제 교재 기준으로 전면 교체
+- fix(db): `connection.py` — pool `timeout` 20s→60s, `max_inactive_connection_lifetime=300` 추가
+- chore(rag): 재인덱싱 실행 (--clear) → 244개→**186개** (부록 58청크 제거, A1-1~A1-56 전부 유지)
+- chore(deploy): `git push main` → Render + Vercel 자동 배포 트리거
+
+### Decisions
+- **LESSON_END_PAGE=178**: 독독독 A1 부록은 페이지 178부터 시작. 마지막 단원(A1-56)에 40개 노이즈 청크가 인덱싱되던 문제 해소
+- **Format B `[\uAC00-\uD7A3]` 요구**: Latin 문자로 시작하는 페이지 푸터("Zusammen A1")가 오탐되는 것을 한국어 문자 요구로 차단
+- **MAX_UNIT_STEP=5**: 홀수 페이지 번호(11, 13, 15...)가 동일 번호 단원으로 오탐되는 패턴을 "이전 단원+5 이내" 조건으로 완전 제거. 정상 단원은 항상 +1 이동이므로 false negative 없음
+
+### Issues
+- **RAG 동작 확인 착오**: 사용자가 "PDF를 봐줄 수 있나요?" 메타 질문으로 테스트 → Claude가 "PDF 열람 불가" 응답. 실제로는 독일어 내용 질문("Das ist ein Nudelgericht. 는 true인가요?")으로 테스트 시 RAG 정상 동작 확인됨. OPENAI_API_KEY는 이미 Render에 설정되어 있었음
+
+### Next
+- [ ] v0.3 착수 계획 수립 (LLM-as-judge 포맷 검증)
+- [ ] 진행률 표시 UX 설계 (완료 단원 처리 방식)
+- [ ] STT 기능 검토 (외부 API vs Web Speech API)
+
+---
+
 ## Progress
 
 ### v0.1 — Claude Streaming Q&A
@@ -26,11 +59,13 @@
 | max_tokens 잘림 (OQ-4) | Done | 1024 → 2048 상향, truncation 안내 개선 |
 | 테스트 (pytest) | Done | f1-spec Section 9 시나리오 29/29 통과 |
 
-### v0.2 — RAG + PDF 벡터 검색 (미착수)
+### v0.2 — RAG + PDF 벡터 검색 (완료)
 
-- [ ] 임베딩 모델 선택 (ADR-003 결정)
-- [ ] PDF 파싱 + 청킹 파이프라인
-- [ ] pgvector 확장 + 벡터 검색 엔드포인트
+- [x] 임베딩 모델 선택 — text-embedding-3-small (ADR-003)
+- [x] PDF 파싱 + 청킹 파이프라인 — pdftotext + chunk_text, 250 chunks
+- [x] pgvector 확장 + 벡터 검색 — VectorSearchRepository, cosine distance
+- [x] RAG → Claude system prompt 주입 — top-3 chunks 실시간 삽입
+- [x] 프로덕션 검증 — Render 로그 "RAG: found 3 chunks for unit A1-1" 확인
 - [ ] STT/TTS 고도화 (외부 API 검토)
 - [x] DB: Render PostgreSQL → Supabase 이전 (pgvector + 90일 제한 해소)
 - [ ] 학습 리마인더 알림 검토 ← user-journey-map.md
@@ -70,6 +105,40 @@
 
 ---
 
+## Session: 2026-02-27 18:56
+
+> **Context**: v0.2 RAG 완성 — PDF 인덱싱 + pgvector 검색 + Render 프로덕션 검증
+
+### Done
+- feat(rag): `scripts/index_pdf.py` — pdftotext(subprocess) 기반 PDF 추출, 204페이지 → 250 chunks 생성
+- fix(rag): `chunk_text()` 무한 루프 버그 2개 수정
+  - 버그1: 경계 탐색 search window가 start보다 앞으로 갈 때 end = start+1 → start 역주행. `search_begin > start` 조건 추가로 수정
+  - 버그2: end >= length 시 start = end - overlap 고정 → 무한루프. `if end >= length: break` 추가
+- feat(rag): OpenAI text-embedding-3-small로 250 chunks 임베딩 생성 후 Supabase document_chunks 삽입 완료
+- fix(rag): `VectorSearchRepository.max_distance` 0.5 → 0.7 (현재 chunk 품질 기준 실용적 임계값)
+- fix(deploy): `requirements.txt`에서 `pdfplumber` 제거 (로컬 전용 스크립트, Render 불필요)
+- fix(deploy): `connection.py` — asyncpg pool `min_size` 2 → 1, `timeout=20.0` 추가 (Render cold start SSL timeout 해소)
+- chore(rag): RAG hit 로그 DEBUG → INFO 승격 (Render 로그에서 가시화)
+- chore(rag): ivfflat 인덱스 생략 — 250 rows에서 sequential scan이 더 빠름. maintenance_work_mem 부족 에러도 회피
+
+### Decisions
+- **pdftotext (CLI) 채택**: pdfplumber/pypdf 모두 chunk_text 버그로 50GB 메모리 소모. pdftotext는 페이지별 subprocess 호출로 Python 힙 최소화
+- **max_distance 0.7**: 현재 chunk들이 저작권 문구 오염으로 실질 거리가 0.61–0.63. 0.5로는 항상 0결과 → 0.7로 상향
+- **ivfflat 인덱스 불필요**: 250 rows에서 pgvector sequential scan이 인덱스보다 빠름. 10K+ rows 이후 재검토
+- **pdfplumber 서버 제외**: index_pdf.py는 로컬 일회성 스크립트. Render Docker에 pdfminer/pypdfium2 대용량 바이너리 불필요
+
+### Issues
+- **50GB 메모리 / exit 137**: chunk_text 무한루프가 원인. pdfplumber→pypdf→pdftotext 전환은 무관했음
+- **Render 배포 실패 (SSL TimeoutError)**: pdfplumber 의존성 제거 + min_size/timeout 조정으로 해소
+- **ivfflat 인덱스 생성 실패**: `memory required is 59MB, maintenance_work_mem is 32MB` — Supabase free tier 제한. 인덱스 없이 운영 결정
+
+### Next
+- [ ] chunk 품질 개선: 각 페이지 저작권 문구(`*본 책은 저작권법에 의해...`)가 모든 chunk 앞에 붙어 노이즈. 추출 시 필터링 필요
+- [ ] 단원 감지 검증: `Einheit/Lektion/Kapitel N` 패턴으로 감지된 A1-1, A1-8, A1-15... 가 실제 교재 단원과 일치하는지 확인
+- [ ] v0.3 착수 계획 수립 (LLM-as-judge 포맷 검증, 인증 개선)
+
+---
+
 ## Session: 2026-02-27 16:04
 
 > **Context**: Google OAuth 로그인 구현 (Supabase Auth), JWT ES256 검증, 사이드바 유저 카드 UI, Vercel 배포 완료
@@ -101,8 +170,8 @@
 - **Vercel 빌드 실패 2**: `frontend/app/setup/page.tsx` 미추적 파일로 커밋 누락 → `/setup?level=A1` 404
 
 ### Next
-- [ ] 프로덕션 E2E 검증 — Render 백엔드 재배포 확인, Google 로그인 → 채팅 → 히스토리 공유 (다기기)
-- [ ] v0.2 RAG 착수 — 임베딩 모델 선택 (ADR-003), PDF 파싱 파이프라인, pgvector 벡터 검색
+- [x] 프로덕션 E2E 검증 — Render 백엔드 재배포 확인, Google 로그인 → 채팅 → 히스토리 공유 (다기기)
+- [x] v0.2 RAG 착수 — 임베딩 모델 선택 (ADR-003), PDF 파싱 파이프라인, pgvector 벡터 검색
 
 ---
 
