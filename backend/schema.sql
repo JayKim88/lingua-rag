@@ -4,18 +4,14 @@
 -- Enable UUID generation
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
--- Sessions: Anonymous user identification via cookie
-CREATE TABLE IF NOT EXISTS sessions (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    last_active_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
+-- Enable vector similarity search (v0.2 RAG)
+CREATE EXTENSION IF NOT EXISTS vector;
 
--- Conversations: One thread per (session, unit)
--- New unit → new conversation (FR-3)
+-- Conversations: One thread per (user, unit)
+-- user_id references Supabase auth.users.id
 CREATE TABLE IF NOT EXISTS conversations (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    session_id      UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    user_id         UUID NOT NULL,
     unit_id         VARCHAR(10) NOT NULL,
     textbook_id     VARCHAR(50) NOT NULL DEFAULT 'dokdokdok-a1',
     level           VARCHAR(10) NOT NULL DEFAULT 'A1',
@@ -34,11 +30,11 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 -- Indexes for performance
-CREATE INDEX IF NOT EXISTS idx_conversations_session_unit
-    ON conversations(session_id, unit_id);
+CREATE INDEX IF NOT EXISTS idx_conversations_user_unit
+    ON conversations(user_id, unit_id);
 
-CREATE INDEX IF NOT EXISTS idx_conversations_session_updated
-    ON conversations(session_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_conversations_user_updated
+    ON conversations(user_id, updated_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_created
     ON messages(conversation_id, created_at DESC);

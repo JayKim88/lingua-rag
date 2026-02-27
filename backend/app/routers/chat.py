@@ -10,8 +10,8 @@ SSE event format:
   data: {"type": "error",       "message": "..."}
   data: [DONE]
 
-FR-5: Per-session asyncio.Lock prevents concurrent streams for the same
-session from interleaving their responses.  The queue is managed on the
+FR-5: Per-user asyncio.Lock prevents concurrent streams for the same
+user from interleaving their responses.  The queue is managed on the
 frontend (useChat hook); the lock here is the server-side safety net.
 """
 
@@ -21,45 +21,38 @@ import json
 import logging
 from uuid import UUID
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
-from app.core.config import settings
-from app.core.constants import SESSION_COOKIE
-from app.db.repositories import (
-    ConversationRepository,
-    MessageRepository,
-    SessionRepository,
-)
+from app.db.repositories import ConversationRepository, MessageRepository
+from app.deps.auth import get_current_user
 from app.models.schemas import ChatRequest
 from app.services.claude_service import ClaudeService
-from app.services.session_service import SessionService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # ---------------------------------------------------------------------------
-# FR-5: Per-session streaming lock (OrderedDict LRU, capped at 1 000 entries)
+# FR-5: Per-user streaming lock (OrderedDict LRU, capped at 1 000 entries)
 #
-# Keyed by session UUID string.  A new Lock is created on first use and
+# Keyed by user UUID string.  A new Lock is created on first use and
 # held for the entire SSE stream duration — including history read and
-# user-message persist, so concurrent requests for the same session cannot
-# race on history snapshot.  The 1 000-entry cap is conservative for a
-# Railway v0.1 deployment; bump in v0.2 when traffic justifies it.
+# user-message persist, so concurrent requests for the same user cannot
+# race on history snapshot.
 # ---------------------------------------------------------------------------
 _SESSION_LOCK_LIMIT = 1_000
 _session_locks: collections.OrderedDict[str, asyncio.Lock] = collections.OrderedDict()
 _session_locks_mutex = asyncio.Lock()
 
 
-async def _get_session_lock(session_id: str) -> asyncio.Lock:
-    """Return (or create) the asyncio.Lock for a given session, with LRU eviction."""
+async def _get_session_lock(user_id: str) -> asyncio.Lock:
+    """Return (or create) the asyncio.Lock for a given user, with LRU eviction."""
     async with _session_locks_mutex:
-        if session_id in _session_locks:
-            _session_locks.move_to_end(session_id)
-            return _session_locks[session_id]
+        if user_id in _session_locks:
+            _session_locks.move_to_end(user_id)
+            return _session_locks[user_id]
         lock = asyncio.Lock()
-        _session_locks[session_id] = lock
+        _session_locks[user_id] = lock
         if len(_session_locks) > _SESSION_LOCK_LIMIT:
             _session_locks.popitem(last=False)  # evict LRU
         return lock
@@ -75,46 +68,39 @@ def _sse_done() -> str:
 
 
 @router.post("/chat")
-async def chat_endpoint(request: Request, body: ChatRequest, response: Response):
+async def chat_endpoint(
+    body: ChatRequest,
+    user_id: UUID = Depends(get_current_user),
+):
     """
     Accept a chat message and stream Claude's response via SSE.
 
     Flow:
-    1. Resolve or create session (cookie)
-    2. Resolve or create conversation for (session, unit)
-    3. Acquire per-session lock (FR-5)
-    4. [INSIDE lock] Fetch last 10 messages as history context
-    5. [INSIDE lock] Persist user message
-    6. [INSIDE lock] Stream from Claude
-    7. [INSIDE lock] Persist assistant message on stream completion
-    8. Emit done / error events
+    1. Resolve or create conversation for (user, unit)
+    2. Acquire per-user lock (FR-5)
+    3. [INSIDE lock] Fetch last 10 messages as history context
+    4. [INSIDE lock] Persist user message
+    5. [INSIDE lock] Stream from Claude
+    6. [INSIDE lock] Persist assistant message on stream completion
+    7. Emit done / error events
 
     History fetch and user-message persist are intentionally inside the lock
-    so that two concurrent requests for the same session cannot race on the
+    so that two concurrent requests for the same user cannot race on the
     history snapshot, ensuring Claude always sees a consistent conversation.
     """
-    session_svc = SessionService()
-    session_repo = SessionRepository()
     conv_repo = ConversationRepository()
     msg_repo = MessageRepository()
     claude_svc = ClaudeService()
 
     # ------------------------------------------------------------------
-    # 1. Session resolution
-    # ------------------------------------------------------------------
-    session_id_raw = request.cookies.get(SESSION_COOKIE)
-    session = await session_svc.resolve_session(session_id_raw, session_repo)
-    session_id: UUID = session["id"]
-
-    # ------------------------------------------------------------------
-    # 2. Conversation resolution
+    # 1. Conversation resolution
     # ------------------------------------------------------------------
     unit_id = body.unit_id or "A1-1"
     level = body.level or "A1"
     textbook_id = body.textbook_id or "dokdokdok-a1"
 
     conversation = await conv_repo.get_or_create(
-        session_id=session_id,
+        user_id=user_id,
         unit_id=unit_id,
         level=level,
         textbook_id=textbook_id,
@@ -123,29 +109,28 @@ async def chat_endpoint(request: Request, body: ChatRequest, response: Response)
     conversation_id: UUID = conversation["id"]
 
     # ------------------------------------------------------------------
-    # 3–8. Stream generator (holds per-session lock for FR-5)
-    # History fetch and user-message persist are INSIDE the lock.
+    # 2–7. Stream generator (holds per-user lock for FR-5)
     # ------------------------------------------------------------------
-    session_lock = await _get_session_lock(str(session_id))
+    user_lock = await _get_session_lock(str(user_id))
 
     async def event_generator():
         full_response = ""
         was_truncated = False
         assistant_msg_id = None
 
-        async with session_lock:
-            # 4. Fetch history INSIDE lock — prevents race with concurrent tab
+        async with user_lock:
+            # 3. Fetch history INSIDE lock — prevents race with concurrent tab
             history = await msg_repo.get_recent(
                 conversation_id=conversation_id,
                 limit=10,
             )
-            # 5. Persist user message INSIDE lock — atomic with history read
+            # 4. Persist user message INSIDE lock — atomic with history read
             await msg_repo.create(
                 conversation_id=conversation_id,
                 role="user",
                 content=body.message,
             )
-            # 6. Stream from Claude
+            # 5. Stream from Claude
             try:
                 async for event in claude_svc.stream(
                     user_message=body.message,
@@ -193,7 +178,7 @@ async def chat_endpoint(request: Request, body: ChatRequest, response: Response)
             finally:
                 yield _sse_done()
 
-    streaming_response = StreamingResponse(
+    return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
         headers={
@@ -202,14 +187,3 @@ async def chat_endpoint(request: Request, body: ChatRequest, response: Response)
             "Connection": "keep-alive",
         },
     )
-
-    # Set session cookie on the streaming response
-    streaming_response.set_cookie(
-        key=SESSION_COOKIE,
-        value=str(session_id),
-        httponly=True,
-        samesite="lax",
-        secure=settings.cookie_secure,
-        max_age=60 * 60 * 24 * 30,  # 30 days
-    )
-    return streaming_response

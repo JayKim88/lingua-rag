@@ -29,54 +29,19 @@ def _record_to_dict(record: asyncpg.Record) -> dict[str, Any]:
     return result
 
 
-class SessionRepository:
-    """CRUD operations for sessions table."""
-
-    async def create(self) -> dict[str, Any]:
-        """Insert a new session and return the record."""
-        pool = get_pool()
-        async with pool.acquire() as conn:
-            record = await conn.fetchrow(
-                """
-                INSERT INTO sessions (id, created_at, last_active_at)
-                VALUES (gen_random_uuid(), NOW(), NOW())
-                RETURNING *
-                """
-            )
-        return _record_to_dict(record)
-
-    async def get_by_id(self, session_id: UUID) -> Optional[dict[str, Any]]:
-        """Fetch a session by its UUID. Returns None if not found."""
-        pool = get_pool()
-        async with pool.acquire() as conn:
-            record = await conn.fetchrow(
-                "SELECT * FROM sessions WHERE id = $1", session_id
-            )
-        return _record_to_dict(record) if record else None
-
-    async def touch(self, session_id: UUID) -> None:
-        """Update last_active_at to NOW()."""
-        pool = get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE sessions SET last_active_at = NOW() WHERE id = $1",
-                session_id,
-            )
-
-
 class ConversationRepository:
     """CRUD operations for conversations table."""
 
     async def get_or_create(
         self,
-        session_id: UUID,
+        user_id: UUID,
         unit_id: str,
         level: str,
         textbook_id: str,
         force_new: bool = False,
     ) -> dict[str, Any]:
         """
-        Return the most recent conversation for (session, unit),
+        Return the most recent conversation for (user, unit),
         or create a new one.
 
         If force_new=True, always creates a new conversation thread
@@ -88,11 +53,11 @@ class ConversationRepository:
                 record = await conn.fetchrow(
                     """
                     SELECT * FROM conversations
-                    WHERE session_id = $1 AND unit_id = $2
+                    WHERE user_id = $1 AND unit_id = $2
                     ORDER BY created_at DESC
                     LIMIT 1
                     """,
-                    session_id,
+                    user_id,
                     unit_id,
                 )
                 if record:
@@ -102,12 +67,12 @@ class ConversationRepository:
             record = await conn.fetchrow(
                 """
                 INSERT INTO conversations
-                    (id, session_id, unit_id, textbook_id, level, created_at, updated_at)
+                    (id, user_id, unit_id, textbook_id, level, created_at, updated_at)
                 VALUES
                     (gen_random_uuid(), $1, $2, $3, $4, NOW(), NOW())
                 RETURNING *
                 """,
-                session_id,
+                user_id,
                 unit_id,
                 textbook_id,
                 level,
@@ -123,17 +88,20 @@ class ConversationRepository:
             )
         return _record_to_dict(record) if record else None
 
-    async def list_by_session(self, session_id: UUID) -> list[dict[str, Any]]:
-        """List all conversations for a session, newest first."""
+    async def list_by_user(self, user_id: UUID) -> list[dict[str, Any]]:
+        """List all conversations for a user with message count, newest first."""
         pool = get_pool()
         async with pool.acquire() as conn:
             records = await conn.fetch(
                 """
-                SELECT * FROM conversations
-                WHERE session_id = $1
-                ORDER BY updated_at DESC
+                SELECT c.*, COUNT(m.id) AS message_count
+                FROM conversations c
+                LEFT JOIN messages m ON m.conversation_id = c.id
+                WHERE c.user_id = $1
+                GROUP BY c.id
+                ORDER BY c.updated_at DESC
                 """,
-                session_id,
+                user_id,
             )
         return [_record_to_dict(r) for r in records]
 

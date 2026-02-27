@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI):
     logger.info("Database pool initialized.")
     # Orphan cleanup: remove user messages older than 1 hour with no assistant reply.
     # These are left by process crashes after saving the user turn but before the
-    # assistant response was saved.  Borrowed from Alpha's pragmatic crash recovery.
+    # assistant response was saved.
     pool = get_pool()
     async with pool.acquire() as conn:
         deleted = await conn.execute("""
@@ -86,8 +86,8 @@ app.add_middleware(
     ),
     allow_credentials=True,  # Required for httponly session cookies
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Accept", "Cookie"],
-    expose_headers=["Set-Cookie"],
+    allow_headers=["Content-Type", "Accept", "Authorization"],
+    expose_headers=[],
 )
 
 # ---------------------------------------------------------------------------

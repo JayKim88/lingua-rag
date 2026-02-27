@@ -12,35 +12,89 @@ interface UseChatOptions {
 export function useChat({ unitId, level, textbookId }: UseChatOptions) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [queueSize, setQueueSize] = useState(0);
 
   const queue = useRef<string[]>([]);
   const streamingRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
+  // Incremented on unit switch to orphan background streams.
+  // An orphaned processMessage drains the stream so the backend can persist
+  // the assistant message, but stops updating the UI.
+  const generationRef = useRef(0);
 
-  // Reset state and abort any in-flight fetch when the unit changes
+  // On unit change: orphan any running stream (do NOT abort — let it drain so
+  // the backend can persist the assistant message), clear UI, load DB history.
   useEffect(() => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
+    generationRef.current += 1;
+    // Clear the ref without aborting; the in-flight fetch continues draining.
+    abortControllerRef.current = null;
+
     setMessages([]);
     setQueueSize(0);
     queue.current = [];
     streamingRef.current = false;
     setIsStreaming(false);
+    setIsLoadingHistory(true);
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const convsRes = await fetch("/api/conversations");
+        if (!convsRes.ok || cancelled) return;
+
+        const { conversations } = await convsRes.json();
+        // list_by_session returns newest-first; find the latest for this unit
+        const conv = (conversations ?? []).find(
+          (c: { unit_id: string }) => c.unit_id === unitId
+        );
+        if (!conv || cancelled) return;
+
+        const msgsRes = await fetch(`/api/conversations/${conv.id}/messages`);
+        if (!msgsRes.ok || cancelled) return;
+
+        const { messages: dbMessages } = await msgsRes.json();
+        if (!cancelled && dbMessages?.length) {
+          setMessages(
+            dbMessages.map(
+              (m: { id: string; role: "user" | "assistant"; content: string; created_at?: string }) => ({
+                id: m.id,
+                role: m.role,
+                content: m.content,
+                isStreaming: false,
+                createdAt: m.created_at,
+              })
+            )
+          );
+        }
+      } finally {
+        if (!cancelled) setIsLoadingHistory(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [unitId]);
 
   const processMessage = useCallback(
     async (content: string) => {
+      // Capture generation at call time. If the unit switches mid-stream,
+      // generationRef.current will differ from myGeneration and we drain
+      // without updating UI.
+      const myGeneration = generationRef.current;
+
       streamingRef.current = true;
       setIsStreaming(true);
 
+      const now = new Date().toISOString();
       const userMsg: Message = {
         id: crypto.randomUUID(),
         role: "user",
         content,
         isStreaming: false,
+        createdAt: now,
       };
       const assistantMsgId = crypto.randomUUID();
       const assistantMsg: Message = {
@@ -48,6 +102,7 @@ export function useChat({ unitId, level, textbookId }: UseChatOptions) {
         role: "assistant",
         content: "",
         isStreaming: true,
+        createdAt: now,
       };
 
       setMessages((prev) => [...prev, userMsg, assistantMsg]);
@@ -87,11 +142,14 @@ export function useChat({ unitId, level, textbookId }: UseChatOptions) {
           const lines = buffer.split("\n");
           buffer = lines.pop() ?? "";
 
+          // Unit switched: drain the stream so the backend finishes and
+          // persists the assistant message, but skip all UI updates.
+          if (generationRef.current !== myGeneration) continue;
+
           for (const line of lines) {
             if (!line.startsWith("data: ")) continue;
             const data = line.slice(6);
 
-            // Guard [DONE] before JSON.parse — breaks both loops via flag
             if (data === "[DONE]") {
               done = true;
               break;
@@ -108,19 +166,20 @@ export function useChat({ unitId, level, textbookId }: UseChatOptions) {
                   )
                 );
               } else if (parsed.type === "truncated") {
-                // Beta's truncation detection: Claude hit max_tokens mid-response
                 setMessages((prev) =>
                   prev.map((m) =>
-                    m.id === assistantMsgId
-                      ? { ...m, isTruncated: true }
-                      : m
+                    m.id === assistantMsgId ? { ...m, isTruncated: true } : m
                   )
                 );
               } else if (parsed.type === "error") {
                 setMessages((prev) =>
                   prev.map((m) =>
                     m.id === assistantMsgId
-                      ? { ...m, content: parsed.message ?? parsed.content, isStreaming: false }
+                      ? {
+                          ...m,
+                          content: parsed.message ?? parsed.content,
+                          isStreaming: false,
+                        }
                       : m
                   )
                 );
@@ -131,37 +190,42 @@ export function useChat({ unitId, level, textbookId }: UseChatOptions) {
           }
         }
       } catch (err) {
-        // Swallow abort errors — these are intentional (unit change)
         if (err instanceof DOMException && err.name === "AbortError") {
           return;
         }
-        const errorMsg = err instanceof Error ? err.message : "알 수 없는 오류";
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantMsgId
-              ? {
-                  ...m,
-                  content: `오류가 발생했습니다: ${errorMsg}`,
-                  isStreaming: false,
-                }
-              : m
-          )
-        );
+        if (generationRef.current === myGeneration) {
+          const errorMsg = err instanceof Error ? err.message : "알 수 없는 오류";
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantMsgId
+                ? {
+                    ...m,
+                    content: `오류가 발생했습니다: ${errorMsg}`,
+                    isStreaming: false,
+                  }
+                : m
+            )
+          );
+        }
       } finally {
-        abortControllerRef.current = null;
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantMsgId ? { ...m, isStreaming: false } : m
-          )
-        );
-        streamingRef.current = false;
-        setIsStreaming(false);
+        // Only update shared UI state if this is still the active unit.
+        // Orphaned streams must not clear abortControllerRef (it may already
+        // point to the new unit's controller) or touch isStreaming.
+        if (generationRef.current === myGeneration) {
+          abortControllerRef.current = null;
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantMsgId ? { ...m, isStreaming: false } : m
+            )
+          );
+          streamingRef.current = false;
+          setIsStreaming(false);
 
-        // Process next queued message
-        if (queue.current.length > 0) {
-          const next = queue.current.shift()!;
-          setQueueSize(queue.current.length);
-          await processMessage(next);
+          if (queue.current.length > 0) {
+            const next = queue.current.shift()!;
+            setQueueSize(queue.current.length);
+            await processMessage(next);
+          }
         }
       }
     },
@@ -180,5 +244,5 @@ export function useChat({ unitId, level, textbookId }: UseChatOptions) {
     [processMessage]
   );
 
-  return { messages, isStreaming, queueSize, sendMessage };
+  return { messages, isStreaming, isLoadingHistory, queueSize, sendMessage };
 }

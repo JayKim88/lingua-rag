@@ -20,17 +20,31 @@ _pool: Optional[asyncpg.Pool] = None
 
 
 async def init_db_pool() -> asyncpg.Pool:
-    """Initialize the global asyncpg connection pool."""
+    """Initialize the global asyncpg connection pool.
+
+    SSL is enabled automatically when DATABASE_URL contains 'sslmode=require'
+    (e.g. Supabase direct connection strings). Local development URLs without
+    sslmode work without SSL.
+    """
     global _pool
     database_url = settings.DATABASE_URL
+
+    # asyncpg does not parse sslmode from the DSN — strip it and pass ssl kwarg.
+    ssl: Optional[str] = None
+    if "sslmode=require" in database_url:
+        database_url = database_url.replace("?sslmode=require", "").replace(
+            "&sslmode=require", ""
+        )
+        ssl = "require"
 
     _pool = await asyncpg.create_pool(
         dsn=database_url,
         min_size=2,
         max_size=10,
         command_timeout=30,
+        ssl=ssl,
     )
-    logger.info("asyncpg pool created (min=2, max=10).")
+    logger.info("asyncpg pool created (min=2, max=10, ssl=%s).", ssl)
     return _pool
 
 

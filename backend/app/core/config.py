@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str
 
+    # Supabase Auth — JWKS endpoint for JWT verification (ES256)
+    SUPABASE_URL: str
+
     # App
     ENVIRONMENT: str = "development"
     LOG_LEVEL: str = "INFO"

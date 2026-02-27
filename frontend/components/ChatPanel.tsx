@@ -13,7 +13,7 @@ interface ChatPanelProps {
 }
 
 export default function ChatPanel({ unitId, level, textbookId }: ChatPanelProps) {
-  const { messages, isStreaming, queueSize, sendMessage } = useChat({
+  const { messages, isStreaming, isLoadingHistory, queueSize, sendMessage } = useChat({
     unitId,
     level,
     textbookId,
@@ -29,7 +29,12 @@ export default function ChatPanel({ unitId, level, textbookId }: ChatPanelProps)
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       <div className="flex-1 overflow-y-auto px-6 py-4">
-        {messages.length === 0 ? (
+        {isLoadingHistory ? (
+          <div className="flex items-center justify-center h-full gap-2 text-gray-400 text-sm">
+            <span className="w-4 h-4 border-2 border-gray-300 border-t-blue-500 rounded-full animate-spin" />
+            이전 대화 불러오는 중...
+          </div>
+        ) : messages.length === 0 ? (
           <div className="flex items-center justify-center h-full text-gray-400 text-sm">
             이 단원에 대해 무엇이든 질문해보세요.
           </div>
@@ -40,7 +45,7 @@ export default function ChatPanel({ unitId, level, textbookId }: ChatPanelProps)
       </div>
       <InputBar
         onSend={sendMessage}
-        isStreaming={isStreaming}
+        isStreaming={isStreaming || isLoadingHistory}
         queueSize={queueSize}
         volume={volume}
         onVolumeChange={setVolume}
