@@ -22,6 +22,10 @@ function ChatContent() {
   const [level, setLevel] = useState<"A1" | "A2">("A1");
   const [visitedUnits, setVisitedUnits] = useState<Set<string>>(new Set());
 
+  const [user, setUser] = useState<{ name: string; email: string } | null>(null);
+  const [showUserMenu, setShowUserMenu] = useState(false);
+  const userMenuRef = useRef<HTMLDivElement>(null);
+
   // Sidebar resize state
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT);
   const [isResizing, setIsResizing] = useState(false);
@@ -43,6 +47,31 @@ function ChatContent() {
     setVisitedUnits(new Set([unit]));
     setInitialized(true);
   }, []);
+
+  // Fetch user info
+  useEffect(() => {
+    const supabase = createClient();
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      if (user) {
+        setUser({
+          name: user.user_metadata?.full_name ?? user.email?.split("@")[0] ?? "User",
+          email: user.email ?? "",
+        });
+      }
+    });
+  }, []);
+
+  // Close user menu on outside click
+  useEffect(() => {
+    if (!showUserMenu) return;
+    const handler = (e: MouseEvent) => {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) {
+        setShowUserMenu(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showUserMenu]);
 
   // Persist to localStorage on unit/level change
   useEffect(() => {
@@ -82,6 +111,13 @@ function ChatContent() {
 
   const currentUnit = UNITS.find((u) => u.id === selectedUnit);
   const textbookId = level === "A2" ? "dokdokdok-a2" : "dokdokdok-a1";
+
+  const initials = user?.name
+    .split(" ")
+    .map((n) => n[0])
+    .join("")
+    .toUpperCase()
+    .slice(0, 2) ?? "?";
 
   const handleSignOut = async () => {
     const supabase = createClient();
@@ -153,6 +189,8 @@ function ChatContent() {
               );
             })}
           </nav>
+
+          {/* Sidebar footer */}
           <div className="p-3 border-t border-gray-100 flex flex-col gap-1">
             <button
               onClick={() => {
@@ -164,12 +202,36 @@ function ChatContent() {
             >
               ← 레벨 재선택
             </button>
-            <button
-              onClick={handleSignOut}
-              className="w-full text-xs text-gray-400 hover:text-red-500 py-1.5 transition-colors text-left px-1"
-            >
-              로그아웃
-            </button>
+
+            {/* User card */}
+            <div ref={userMenuRef} className="relative">
+              {showUserMenu && (
+                <div className="absolute bottom-full left-0 right-0 mb-1 bg-white border border-gray-200 rounded-xl shadow-lg overflow-hidden z-50">
+                  <div className="px-3 py-2.5 border-b border-gray-100">
+                    <p className="text-xs text-gray-500 truncate">{user?.email}</p>
+                  </div>
+                  <div className="p-1">
+                    <button
+                      onClick={handleSignOut}
+                      className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                    >
+                      로그아웃
+                    </button>
+                  </div>
+                </div>
+              )}
+              <button
+                onClick={() => setShowUserMenu((v) => !v)}
+                className="w-full flex items-center gap-2 px-2 py-2 rounded-lg hover:bg-gray-100 transition-colors"
+              >
+                <div className="w-7 h-7 rounded-full bg-blue-500 flex items-center justify-center text-white text-xs font-semibold shrink-0">
+                  {initials}
+                </div>
+                <span className="text-sm text-gray-700 truncate flex-1 text-left">
+                  {user?.name ?? "…"}
+                </span>
+              </button>
+            </div>
           </div>
         </aside>
 
