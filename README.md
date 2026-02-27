@@ -32,6 +32,7 @@ graph TB
         subgraph Services["Services"]
             AuthDep["JWT 검증\n(PyJWKClient · ES256)"]
             ClaudeSvc["ClaudeService\nSSE 스트리밍 · 3회 재시도"]
+            EmbedSvc["EmbeddingService\nOpenAI text-embedding-3-small"]
         end
         subgraph Routers["Routers"]
             ChatRouter["POST /api/chat"]
@@ -44,9 +45,11 @@ graph TB
     subgraph DB["Render PostgreSQL"]
         Conversations["conversations\n(user_id → Supabase UUID)"]
         Messages["messages"]
+        Chunks["document_chunks\n(pgvector · 186청크)"]
     end
 
     Claude["Claude claude-sonnet-4-6\n(Anthropic API)"]
+    OpenAI["OpenAI\n(Embeddings API)"]
 
     UI <-->|"SSE stream"| Hook
     Hook <-->|"POST /api/chat"| Proxy
@@ -56,10 +59,15 @@ graph TB
     AuthDep -->|"JWKS 조회"| JWKS
     FastAPI --> ChatRouter
     ChatRouter --> Lock
+    ChatRouter --> EmbedSvc
+    EmbedSvc -->|"embed(message)"| OpenAI
+    OpenAI -->|"vector(1536)"| EmbedSvc
+    EmbedSvc -->|"cosine search\n(unit_id scope)"| Chunks
+    Chunks -->|"top-3 chunks"| ChatRouter
     ChatRouter --> ClaudeSvc
     ChatRouter <--> Conversations
     ChatRouter <--> Messages
-    ClaudeSvc <-->|"Streaming API"| Claude
+    ClaudeSvc <-->|"Streaming API\n(system prompt + RAG + history)"| Claude
 
     Browser -->|"signInWithOAuth"| SupaAuth
     SupaAuth -->|"OAuth redirect"| Google
@@ -113,6 +121,7 @@ sequenceDiagram
     participant Proxy as Next.js Proxy<br/>/api/chat/route.ts
     participant API as FastAPI<br/>/api/chat
     participant DB as PostgreSQL
+    participant OAI as OpenAI<br/>Embeddings API
     participant LLM as Claude API
 
     User->>UI: 메시지 입력 후 전송
@@ -129,7 +138,12 @@ sequenceDiagram
         API->>DB: 최근 10개 메시지 조회 (history)
         API->>DB: user 메시지 저장 (messages)
 
-        API->>LLM: streaming API 호출<br/>(system prompt + history + message)
+        API->>OAI: embed(message) → vector(1536)
+        OAI-->>API: embedding vector
+        API->>DB: pgvector cosine search<br/>(unit_id scope, max_distance=0.7, top-3)
+        DB-->>API: RAG chunks (교재 원문)
+
+        API->>LLM: streaming API 호출<br/>(system prompt + RAG chunks + history + message)
 
         loop SSE 스트리밍
             LLM-->>API: text chunk
@@ -176,6 +190,17 @@ erDiagram
     }
 
     conversations ||--o{ messages : "1 대화 : N 메시지"
+
+    document_chunks {
+        UUID id PK
+        VARCHAR textbook_id "dokdokdok-a1"
+        VARCHAR unit_id "NULL = 단원 무관 콘텐츠"
+        INTEGER chunk_index
+        TEXT content
+        VECTOR_1536 embedding "text-embedding-3-small"
+        JSONB metadata "page_start, page_end"
+        TIMESTAMPTZ created_at
+    }
 ```
 
 ## 기술 스택
@@ -186,7 +211,8 @@ erDiagram
 | Auth | Supabase Auth (Google OAuth, JWT ES256) |
 | Backend | FastAPI, Python 3.11, asyncpg |
 | AI | Claude claude-sonnet-4-6 (Anthropic SSE Streaming) |
-| DB | PostgreSQL (pgcrypto, asyncpg) |
+| RAG | OpenAI `text-embedding-3-small` + pgvector (cosine 유사도 검색) |
+| DB | PostgreSQL (pgcrypto, pgvector, asyncpg) |
 | Deploy | Vercel (Frontend) + Render (Backend + DB) |
 
 ## 유저 플로우
@@ -212,9 +238,11 @@ lingua-rag/
 │   │   ├── deps/          # auth.py — Supabase JWKS JWT 검증
 │   │   ├── models/        # Pydantic v2 스키마
 │   │   ├── routers/       # chat, conversations, health 엔드포인트
-│   │   ├── services/      # ClaudeService (SSE)
+│   │   ├── services/      # ClaudeService (SSE), EmbeddingService (OpenAI)
 │   │   └── main.py        # FastAPI 앱, CORS, lifespan
-│   ├── schema.sql          # DB 초기화 스크립트
+│   ├── scripts/
+│   │   └── index_pdf.py   # PDF → 청크 → OpenAI 임베딩 → Supabase 인덱싱
+│   ├── schema.sql          # DB 초기화 스크립트 (conversations, messages, document_chunks)
 │   ├── requirements.txt
 │   ├── Dockerfile          # Render 배포용
 │   └── .env.example
@@ -300,6 +328,7 @@ npm run dev
 | `DATABASE_URL` | ✅ | PostgreSQL 연결 URL |
 | `SUPABASE_URL` | ✅ | Supabase 프로젝트 URL (JWKS JWT 검증용) |
 | `FRONTEND_URL` | ✅ | CORS 허용 오리진 (쉼표 구분) |
+| `OPENAI_API_KEY` | ✅ | OpenAI API 키 (RAG 쿼리 임베딩용) |
 | `ENVIRONMENT` | - | `development` / `production` (기본값: `development`) |
 | `CLAUDE_MODEL` | - | 기본값: `claude-sonnet-4-6` |
 
@@ -333,11 +362,16 @@ FRONTEND_URL=https://my-app.vercel.app,https://*.vercel.app
 3. **PostgreSQL** 추가 (Free 티어) → Internal Database URL 복사
 4. 환경 변수 설정:
    - `DATABASE_URL` = PostgreSQL Internal URL
-   - `ANTHROPIC_API_KEY` = API 키
+   - `ANTHROPIC_API_KEY` = Anthropic API 키
+   - `OPENAI_API_KEY` = OpenAI API 키 (RAG 임베딩)
    - `SUPABASE_URL` = Supabase 프로젝트 URL
    - `FRONTEND_URL` = Vercel 배포 URL
    - `ENVIRONMENT` = `production`
-5. PostgreSQL Shell에서 `schema.sql` 실행
+5. PostgreSQL Shell에서 `schema.sql` 실행 (`vector` 익스텐션 포함)
+6. PDF 인덱싱 실행 (최초 1회):
+   ```bash
+   python scripts/index_pdf.py --textbook dokdokdok-a1 --pdf <PDF_PATH> --clear
+   ```
 
 ### Vercel (Frontend)
 
@@ -373,6 +407,8 @@ FRONTEND_URL=https://my-app.vercel.app,https://*.vercel.app
 **동시성 제어**: 같은 유저의 중복 요청을 `asyncio.Lock` (LRU OrderedDict, 1,000 유저 캡)으로 직렬화. `--workers 1` 단일 프로세스 필수 (asyncio.Lock은 프로세스 간 공유 불가).
 
 **고아 메시지 정리**: 앱 시작 시 1시간 이상 된 사용자 메시지 중 어시스턴트 응답이 없는 것을 삭제. 미드스트림 크래시로 발생하는 불완전한 대화 이력 방지.
+
+**RAG 파이프라인**: 사용자 메시지를 `text-embedding-3-small`로 임베딩 → pgvector cosine 유사도 검색 (max_distance=0.7, top-3) → 매칭된 교재 원문을 Claude 시스템 프롬프트에 `## 교재 원문 참고`로 주입. 단원이 선택된 경우 해당 unit_id로 검색 범위를 제한. PDF 인덱싱은 `scripts/index_pdf.py`로 오프라인 실행 (독독독 A1: 186청크, 56단원).
 
 **Render cold-start**: `useBackendHealth` 훅이 `/api/health`를 폴링(3초 간격, 최대 20회). 서버 준비 중이면 채팅 화면 상단에 경고 배너 표시.
 
