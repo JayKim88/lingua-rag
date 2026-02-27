@@ -184,3 +184,63 @@ class MessageRepository:
                 conversation_id,
             )
         return [_record_to_dict(r) for r in records]
+
+
+class VectorSearchRepository:
+    """pgvector similarity search for RAG (v0.2)."""
+
+    async def search(
+        self,
+        query_embedding: list[float],
+        textbook_id: str = "dokdokdok-a1",
+        unit_id: Optional[str] = None,
+        limit: int = 3,
+        max_distance: float = 0.7,
+    ) -> list[dict[str, Any]]:
+        """
+        Return document chunks most similar to query_embedding.
+
+        Uses cosine distance (<=>). Lower distance = more similar.
+        Chunks with distance >= max_distance are excluded.
+        If unit_id is given, only searches within that unit.
+        """
+        pool = get_pool()
+        # asyncpg passes vectors as cast strings
+        embedding_str = f"[{','.join(map(str, query_embedding))}]"
+
+        async with pool.acquire() as conn:
+            if unit_id:
+                records = await conn.fetch(
+                    """
+                    SELECT content, metadata,
+                           embedding <=> $1::vector AS distance
+                    FROM document_chunks
+                    WHERE textbook_id = $2
+                      AND unit_id = $3
+                      AND embedding <=> $1::vector < $4
+                    ORDER BY distance
+                    LIMIT $5
+                    """,
+                    embedding_str,
+                    textbook_id,
+                    unit_id,
+                    max_distance,
+                    limit,
+                )
+            else:
+                records = await conn.fetch(
+                    """
+                    SELECT content, metadata,
+                           embedding <=> $1::vector AS distance
+                    FROM document_chunks
+                    WHERE textbook_id = $2
+                      AND embedding <=> $1::vector < $3
+                    ORDER BY distance
+                    LIMIT $4
+                    """,
+                    embedding_str,
+                    textbook_id,
+                    max_distance,
+                    limit,
+                )
+        return [_record_to_dict(r) for r in records]

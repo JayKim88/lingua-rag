@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     # Supabase Auth — JWKS endpoint for JWT verification (ES256)
     SUPABASE_URL: str
 
+    # OpenAI — Embeddings API for RAG (v0.2)
+    OPENAI_API_KEY: str = ""
+
     # App
     ENVIRONMENT: str = "development"
     LOG_LEVEL: str = "INFO"

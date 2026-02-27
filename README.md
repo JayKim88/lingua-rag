@@ -1,27 +1,36 @@
 # LinguaRAG
 
-독독독 A1 독일어 교재 기반 AI 튜터 앱. 단원을 선택하면 Claude가 해당 단원의 문법과 어휘를 실시간 스트리밍으로 설명합니다.
+독독독 A1 독일어 교재 기반 AI 튜터 앱. Google 계정으로 로그인한 뒤 단원을 선택하면 Claude가 해당 단원의 문법과 어휘를 실시간 스트리밍으로 설명합니다.
 
 ## 아키텍처
 
-### 시스템 구성
+### 전체 시스템 구성
 
 ```mermaid
 graph TB
     subgraph Browser["브라우저"]
         UI["채팅 UI\n(React Components)"]
         Hook["useChat Hook\n(SSE 수신 · 메시지 큐)"]
+        Health["useBackendHealth\n(Render cold-start 감지)"]
     end
 
     subgraph Vercel["Vercel (Frontend)"]
-        Next["Next.js 15\nApp Router"]
-        Proxy["API Route Proxy\n/app/api/chat/route.ts\n쿠키 포워딩"]
+        MW["Middleware\n(Supabase 세션 검증 → /login 리다이렉트)"]
+        Next["Next.js 15 App Router"]
+        Proxy["API Route Proxy\n/app/api/chat/route.ts\nJWT Bearer 주입"]
     end
+
+    subgraph Supabase["Supabase (Auth)"]
+        SupaAuth["Auth Service\nGoogle OAuth"]
+        JWKS["JWKS Endpoint\n/.well-known/jwks.json"]
+    end
+
+    Google["Google\n(OAuth Provider)"]
 
     subgraph Render["Render (Backend)"]
         FastAPI["FastAPI\n(uvicorn · asyncpg)"]
         subgraph Services["Services"]
-            SessionSvc["SessionService\n쿠키 → 세션 UUID"]
+            AuthDep["JWT 검증\n(PyJWKClient · ES256)"]
             ClaudeSvc["ClaudeService\nSSE 스트리밍 · 3회 재시도"]
         end
         subgraph Routers["Routers"]
@@ -29,29 +38,69 @@ graph TB
             ConvRouter["GET /api/conversations"]
             HealthRouter["GET /api/health"]
         end
-        Lock["asyncio.Lock\n(LRU · 1,000 세션 캡)\n동시 요청 직렬화"]
+        Lock["asyncio.Lock\n(LRU · 1,000 유저 캡)\n동시 요청 직렬화"]
     end
 
     subgraph DB["Render PostgreSQL"]
-        Sessions["sessions"]
-        Conversations["conversations"]
+        Conversations["conversations\n(user_id → Supabase UUID)"]
         Messages["messages"]
     end
 
     Claude["Claude claude-sonnet-4-6\n(Anthropic API)"]
 
-    UI <-->|"SSE stream\nhttponly cookie"| Hook
-    Hook <-->|"fetch POST /api/chat"| Next
-    Next --> Proxy
-    Proxy <-->|"쿠키 포워딩\nSet-Cookie 반환"| FastAPI
+    UI <-->|"SSE stream"| Hook
+    Hook <-->|"POST /api/chat"| Proxy
+    Proxy -->|"getSession() → access_token"| SupaAuth
+    Proxy -->|"Authorization: Bearer JWT"| FastAPI
+    FastAPI --> AuthDep
+    AuthDep -->|"JWKS 조회"| JWKS
     FastAPI --> ChatRouter
-    ChatRouter --> SessionSvc
     ChatRouter --> Lock
     ChatRouter --> ClaudeSvc
-    SessionSvc <--> Sessions
     ChatRouter <--> Conversations
     ChatRouter <--> Messages
     ClaudeSvc <-->|"Streaming API"| Claude
+
+    Browser -->|"signInWithOAuth"| SupaAuth
+    SupaAuth -->|"OAuth redirect"| Google
+    Google -->|"authorization code"| SupaAuth
+    SupaAuth -->|"session cookie"| Vercel
+    MW -->|"getUser() 검증"| SupaAuth
+```
+
+### 인증 흐름
+
+```mermaid
+sequenceDiagram
+    actor User as 사용자
+    participant Login as /login
+    participant MW as Middleware
+    participant Supabase as Supabase Auth
+    participant Google as Google OAuth
+    participant Proxy as Next.js Proxy
+    participant API as FastAPI
+
+    User->>Login: Google로 계속하기
+    Login->>Supabase: signInWithOAuth({ provider: "google" })
+    Supabase->>Google: OAuth redirect
+    Google-->>Supabase: authorization code
+    Supabase-->>Login: /auth/callback?code=...
+    Login->>Supabase: exchangeCodeForSession(code)
+    Supabase-->>Login: session (access_token JWT)
+
+    User->>MW: 페이지 요청
+    MW->>Supabase: getUser() (서버 측 JWT 재검증)
+    alt 미인증
+        MW-->>User: /login 리다이렉트
+    else 인증됨
+        MW-->>User: 페이지 응답
+    end
+
+    User->>Proxy: POST /api/chat
+    Proxy->>Supabase: getSession() → access_token
+    Proxy->>API: Authorization: Bearer <JWT>
+    API->>API: PyJWKClient → ES256 검증
+    API-->>Proxy: SSE stream
 ```
 
 ### SSE 채팅 요청 흐름
@@ -72,11 +121,11 @@ sequenceDiagram
     alt 스트리밍 중
         Hook->>Hook: 큐에 추가 (queueSize++)
     else 대기 중
-        Hook->>Proxy: POST /api/chat<br/>{message, unit_id, level}<br/>+ Cookie 헤더
-        Proxy->>API: POST /api/chat<br/>쿠키 포워딩
-        API->>DB: 세션 조회/생성 (sessions)
+        Hook->>Proxy: POST /api/chat<br/>{message, unit_id, level}
+        Proxy->>API: POST /api/chat<br/>Authorization: Bearer JWT
+        API->>API: JWT 검증 → user_id 추출
         API->>DB: 대화 조회/생성 (conversations)
-        API->>API: session_lock 획득
+        API->>API: user_lock 획득
         API->>DB: 최근 10개 메시지 조회 (history)
         API->>DB: user 메시지 저장 (messages)
 
@@ -97,12 +146,7 @@ sequenceDiagram
         API->>DB: assistant 메시지 저장 (messages)
         API-->>Hook: data: {"type":"done",...}
         API-->>Hook: data: [DONE]
-        API->>API: session_lock 해제
-
-        alt Set-Cookie 반환
-            API-->>Proxy: Set-Cookie: lingua_session=...
-            Proxy-->>Hook: Set-Cookie 포워딩
-        end
+        API->>API: user_lock 해제
 
         Hook->>Hook: 큐에 다음 메시지 있으면 처리
     end
@@ -112,15 +156,9 @@ sequenceDiagram
 
 ```mermaid
 erDiagram
-    sessions {
-        UUID id PK
-        TIMESTAMPTZ created_at
-        TIMESTAMPTZ last_active_at
-    }
-
     conversations {
         UUID id PK
-        UUID session_id FK
+        UUID user_id "Supabase auth.users.id"
         VARCHAR unit_id
         VARCHAR textbook_id
         VARCHAR level
@@ -137,7 +175,6 @@ erDiagram
         TIMESTAMPTZ created_at
     }
 
-    sessions ||--o{ conversations : "1 세션 : N 대화"
     conversations ||--o{ messages : "1 대화 : N 메시지"
 ```
 
@@ -146,10 +183,22 @@ erDiagram
 | 레이어 | 기술 |
 |--------|------|
 | Frontend | Next.js 15, React 19, TypeScript, Tailwind CSS |
+| Auth | Supabase Auth (Google OAuth, JWT ES256) |
 | Backend | FastAPI, Python 3.11, asyncpg |
 | AI | Claude claude-sonnet-4-6 (Anthropic SSE Streaming) |
 | DB | PostgreSQL (pgcrypto, asyncpg) |
 | Deploy | Vercel (Frontend) + Render (Backend + DB) |
+
+## 유저 플로우
+
+```
+/login  →  Google OAuth  →  /  (레벨 선택)  →  /setup  (단원 선택)  →  /chat
+```
+
+- `/login` — Google 로그인, 미인증 시 모든 경로에서 리다이렉트
+- `/` — A1 / A2 레벨 선택 (재방문 시 마지막 단원으로 바로 이동)
+- `/setup` — 독독독 교재 단원 선택 (Band 탭 + 라디오 리스트)
+- `/chat` — 단원별 대화 패널, 사이드바 단원 전환, TTS 발음 재생
 
 ## 프로젝트 구조
 
@@ -157,23 +206,38 @@ erDiagram
 lingua-rag/
 ├── backend/
 │   ├── app/
-│   │   ├── core/          # config, constants
+│   │   ├── core/          # config (Settings), constants
 │   │   ├── data/          # 독독독 A1 56개 단원 데이터, 시스템 프롬프트
 │   │   ├── db/            # asyncpg 커넥션 풀, 레포지토리
+│   │   ├── deps/          # auth.py — Supabase JWKS JWT 검증
 │   │   ├── models/        # Pydantic v2 스키마
 │   │   ├── routers/       # chat, conversations, health 엔드포인트
-│   │   ├── services/      # ClaudeService (SSE), SessionService
+│   │   ├── services/      # ClaudeService (SSE)
 │   │   └── main.py        # FastAPI 앱, CORS, lifespan
 │   ├── schema.sql          # DB 초기화 스크립트
 │   ├── requirements.txt
 │   ├── Dockerfile          # Render 배포용
 │   └── .env.example
 └── frontend/
-    ├── app/               # Next.js App Router
-    │   └── api/chat/      # Next.js → FastAPI 프록시 (쿠키 포워딩)
-    ├── components/        # ChatPanel, MessageList, InputBar
-    ├── hooks/             # useChat (SSE 스트리밍, 메시지 큐)
-    ├── lib/               # types, API 클라이언트
+    ├── app/
+    │   ├── api/            # Next.js → FastAPI 프록시 (JWT 주입)
+    │   │   ├── chat/       # POST — SSE 스트림 프록시
+    │   │   ├── conversations/  # GET — 대화 목록/메시지
+    │   │   └── health/     # GET — Render cold-start 폴링
+    │   ├── auth/callback/  # Supabase OAuth 콜백 처리
+    │   ├── login/          # Google 로그인 페이지
+    │   ├── setup/          # 교재 단원 선택 페이지
+    │   ├── chat/           # 메인 채팅 페이지 (사이드바 + ChatPanel)
+    │   └── page.tsx        # 레벨 선택 (Home)
+    ├── components/         # ChatPanel, MessageList, InputBar
+    ├── hooks/
+    │   ├── useChat.ts      # SSE 스트리밍, 메시지 큐
+    │   ├── useBackendHealth.ts  # Render cold-start 감지
+    │   └── useTTS.ts       # Web Speech API (독일어 발음)
+    ├── lib/
+    │   ├── supabase/       # client.ts, server.ts (SSR)
+    │   └── types.ts        # Message, Unit 타입, UNITS 데이터
+    ├── middleware.ts        # Supabase 세션 검증 → 미인증 시 /login
     └── .env.example
 ```
 
@@ -195,6 +259,7 @@ data: [DONE]                                      # 스트림 종료
 - Node.js 20+
 - PostgreSQL (로컬 또는 Render)
 - Anthropic API 키
+- Supabase 프로젝트 (Google OAuth 활성화)
 
 ### Backend
 
@@ -204,7 +269,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 cp .env.example .env
-# .env에서 ANTHROPIC_API_KEY, DATABASE_URL 입력
+# .env에서 ANTHROPIC_API_KEY, DATABASE_URL, SUPABASE_URL 입력
 
 # DB 스키마 초기화
 psql $DATABASE_URL -f schema.sql
@@ -219,7 +284,7 @@ cd frontend
 npm install
 
 cp .env.example .env.local
-# .env.local에서 BACKEND_URL 확인 (기본값: http://localhost:8000)
+# .env.local에서 BACKEND_URL, NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY 입력
 
 npm run dev
 # http://localhost:3000
@@ -233,6 +298,7 @@ npm run dev
 |------|------|------|
 | `ANTHROPIC_API_KEY` | ✅ | Anthropic API 키 |
 | `DATABASE_URL` | ✅ | PostgreSQL 연결 URL |
+| `SUPABASE_URL` | ✅ | Supabase 프로젝트 URL (JWKS JWT 검증용) |
 | `FRONTEND_URL` | ✅ | CORS 허용 오리진 (쉼표 구분) |
 | `ENVIRONMENT` | - | `development` / `production` (기본값: `development`) |
 | `CLAUDE_MODEL` | - | 기본값: `claude-sonnet-4-6` |
@@ -247,8 +313,18 @@ FRONTEND_URL=https://my-app.vercel.app,https://*.vercel.app
 | 변수 | 필수 | 설명 |
 |------|------|------|
 | `BACKEND_URL` | ✅ | FastAPI 백엔드 URL |
+| `NEXT_PUBLIC_SUPABASE_URL` | ✅ | Supabase 프로젝트 URL |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | ✅ | Supabase anon (public) API 키 |
 
 ## 배포
+
+### Supabase (Auth)
+
+1. [supabase.com](https://supabase.com)에서 새 프로젝트 생성
+2. **Authentication → Providers → Google** 활성화
+   - Google Cloud Console에서 OAuth 클라이언트 ID/Secret 발급
+   - Authorized redirect URI: `https://<project>.supabase.co/auth/v1/callback`
+3. **Project Settings → API**에서 `URL`과 `anon` 키 확인
 
 ### Render (Backend)
 
@@ -258,6 +334,7 @@ FRONTEND_URL=https://my-app.vercel.app,https://*.vercel.app
 4. 환경 변수 설정:
    - `DATABASE_URL` = PostgreSQL Internal URL
    - `ANTHROPIC_API_KEY` = API 키
+   - `SUPABASE_URL` = Supabase 프로젝트 URL
    - `FRONTEND_URL` = Vercel 배포 URL
    - `ENVIRONMENT` = `production`
 5. PostgreSQL Shell에서 `schema.sql` 실행
@@ -266,25 +343,39 @@ FRONTEND_URL=https://my-app.vercel.app,https://*.vercel.app
 
 1. Vercel에서 새 프로젝트 → GitHub 리포 연결
 2. Root Directory: `frontend`
-3. 환경 변수: `BACKEND_URL=<Render 백엔드 URL>`
+3. 환경 변수 설정:
+   - `BACKEND_URL` = Render 백엔드 URL
+   - `NEXT_PUBLIC_SUPABASE_URL` = Supabase URL
+   - `NEXT_PUBLIC_SUPABASE_ANON_KEY` = Supabase anon 키
+4. Supabase **Authentication → URL Configuration**에서 추가:
+   - Site URL: `https://your-app.vercel.app`
+   - Redirect URLs: `https://your-app.vercel.app/auth/callback`
 
 ## API 엔드포인트
+
+모든 엔드포인트는 `Authorization: Bearer <Supabase JWT>` 헤더 필요.
 
 | Method | Path | 설명 |
 |--------|------|------|
 | `POST` | `/api/chat` | SSE 스트리밍 Q&A |
-| `GET` | `/api/conversations` | 현재 세션의 대화 목록 |
+| `GET` | `/api/conversations` | 현재 유저의 대화 목록 |
 | `GET` | `/api/conversations/{id}/messages` | 대화 메시지 조회 |
 | `GET` | `/api/health` | 헬스 체크 (DB 연결 포함) |
 
 ## 설계 결정
 
-**세션 관리**: httponly 쿠키 기반 익명 세션. 로그인 없이 대화 이력 유지.
+**인증**: Supabase Google OAuth + JWT Bearer. httponly 쿠키 기반 익명 세션에서 전환. JWT는 Next.js API Route에서만 백엔드에 전달 — 브라우저가 FastAPI를 직접 호출하지 않음.
 
-**단원별 대화 격리**: `(session_id, unit_id)` 조합으로 대화를 분리. 단원 전환 시 새 대화 시작.
+**JWT 검증**: FastAPI가 Supabase JWKS 엔드포인트(`/auth/v1/.well-known/jwks.json`)에서 공개키를 가져와 ES256으로 검증. `PyJWKClient`의 `lru_cache`로 JWKS 응답 캐싱.
 
-**동시성 제어**: 같은 세션의 중복 요청을 `asyncio.Lock` (LRU OrderedDict, 1,000 세션 캡)으로 직렬화. `--workers 1` 단일 프로세스 필수 (asyncio.Lock은 프로세스 간 공유 불가).
+**단원별 대화 격리**: `(user_id, unit_id)` 조합으로 대화를 분리. 단원 전환 시 새 대화 시작.
+
+**동시성 제어**: 같은 유저의 중복 요청을 `asyncio.Lock` (LRU OrderedDict, 1,000 유저 캡)으로 직렬화. `--workers 1` 단일 프로세스 필수 (asyncio.Lock은 프로세스 간 공유 불가).
 
 **고아 메시지 정리**: 앱 시작 시 1시간 이상 된 사용자 메시지 중 어시스턴트 응답이 없는 것을 삭제. 미드스트림 크래시로 발생하는 불완전한 대화 이력 방지.
 
-**Next.js 프록시**: 브라우저에서 FastAPI 백엔드를 직접 호출하지 않고 `app/api/chat/route.ts`를 통해 프록시. 세션 쿠키를 안전하게 포워딩.
+**Render cold-start**: `useBackendHealth` 훅이 `/api/health`를 폴링(3초 간격, 최대 20회). 서버 준비 중이면 채팅 화면 상단에 경고 배너 표시.
+
+**채팅 패널 지속성**: 단원 전환 시 기존 패널을 unmount하지 않고 `display: none`으로 숨김. 단원 재선택 시 대화 이력이 즉시 복원됨.
+
+**Next.js 프록시**: 브라우저에서 FastAPI 백엔드를 직접 호출하지 않고 `app/api/chat/route.ts`를 통해 프록시. Supabase access token을 서버 사이드에서 주입해 Bearer 헤더로 전달.

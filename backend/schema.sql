@@ -38,3 +38,24 @@ CREATE INDEX IF NOT EXISTS idx_conversations_user_updated
 
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_created
     ON messages(conversation_id, created_at DESC);
+
+-- Document chunks: PDF textbook content indexed for RAG (v0.2)
+CREATE TABLE IF NOT EXISTS document_chunks (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    textbook_id  VARCHAR(50) NOT NULL DEFAULT 'dokdokdok-a1',
+    unit_id      VARCHAR(10),           -- NULL = cross-unit content
+    chunk_index  INTEGER NOT NULL,
+    content      TEXT NOT NULL,
+    embedding    vector(1536),          -- text-embedding-3-small
+    metadata     JSONB DEFAULT '{}',    -- {"page_start": N, "page_end": N}
+    created_at   TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_document_chunks_unit
+    ON document_chunks(textbook_id, unit_id);
+
+-- ivfflat index for approximate nearest neighbor search
+-- Run AFTER inserting data (requires at least 1 row with non-null embedding)
+-- CREATE INDEX ON document_chunks
+--     USING ivfflat (embedding vector_cosine_ops)
+--     WITH (lists = 10);

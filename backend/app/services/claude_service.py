@@ -43,6 +43,7 @@ class ClaudeService:
         unit_id: str,
         level: str,
         textbook_id: str,
+        rag_chunks: list[str] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
         Stream Claude's response as SSE-compatible events.
@@ -64,6 +65,10 @@ class ClaudeService:
         """
         unit_data = DOKDOKDOK_A1.get(unit_id) if textbook_id == "dokdokdok-a1" else None
         system_prompt = build_system_prompt(level=level, unit_id=unit_id, unit_data=unit_data)
+
+        if rag_chunks:
+            joined = "\n\n---\n\n".join(rag_chunks)
+            system_prompt += f"\n\n## 교재 원문 참고\n\n{joined}"
 
         # Build message list for Claude (history + current user message)
         messages = _build_messages(history, user_message)

@@ -24,10 +24,11 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
-from app.db.repositories import ConversationRepository, MessageRepository
+from app.db.repositories import ConversationRepository, MessageRepository, VectorSearchRepository
 from app.deps.auth import get_current_user
 from app.models.schemas import ChatRequest
 from app.services.claude_service import ClaudeService
+from app.services.embedding_service import get_embedding_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -90,6 +91,7 @@ async def chat_endpoint(
     """
     conv_repo = ConversationRepository()
     msg_repo = MessageRepository()
+    vector_repo = VectorSearchRepository()
     claude_svc = ClaudeService()
 
     # ------------------------------------------------------------------
@@ -130,6 +132,24 @@ async def chat_endpoint(
                 role="user",
                 content=body.message,
             )
+
+            # RAG: embed user message → search similar chunks → inject context
+            rag_chunks: list[str] = []
+            try:
+                embedding_svc = get_embedding_service()
+                query_vec = await embedding_svc.embed(body.message)
+                results = await vector_repo.search(
+                    query_embedding=query_vec,
+                    textbook_id=textbook_id,
+                    unit_id=unit_id,
+                    limit=3,
+                )
+                rag_chunks = [r["content"] for r in results]
+                if rag_chunks:
+                    logger.debug("RAG: found %d chunks for unit %s", len(rag_chunks), unit_id)
+            except Exception as exc:
+                logger.warning("RAG search failed, using base prompt: %s", exc)
+
             # 5. Stream from Claude
             try:
                 async for event in claude_svc.stream(
@@ -138,6 +158,7 @@ async def chat_endpoint(
                     unit_id=unit_id,
                     level=level,
                     textbook_id=textbook_id,
+                    rag_chunks=rag_chunks or None,
                 ):
                     if event["type"] == "token":
                         full_response += event["content"]
