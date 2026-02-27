@@ -146,7 +146,7 @@ async def chat_endpoint(
                 )
                 rag_chunks = [r["content"] for r in results]
                 if rag_chunks:
-                    logger.debug("RAG: found %d chunks for unit %s", len(rag_chunks), unit_id)
+                    logger.info("RAG: found %d chunks for unit %s (distances logged at debug)", len(rag_chunks), unit_id)
             except Exception as exc:
                 logger.warning("RAG search failed, using base prompt: %s", exc)
 
