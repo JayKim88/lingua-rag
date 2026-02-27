@@ -39,9 +39,10 @@ async def init_db_pool() -> asyncpg.Pool:
 
     _pool = await asyncpg.create_pool(
         dsn=database_url,
-        min_size=2,
+        min_size=1,
         max_size=10,
         command_timeout=30,
+        timeout=20.0,  # per-connection timeout; default can be too tight on Render cold start
         ssl=ssl,
     )
     logger.info("asyncpg pool created (min=2, max=10, ssl=%s).", ssl)
