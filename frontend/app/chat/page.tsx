@@ -2,14 +2,23 @@
 
 import { Suspense, useState, useEffect, useRef, useCallback } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
+import dynamic from "next/dynamic";
 import ChatPanel from "@/components/ChatPanel";
 import { UNITS } from "@/lib/types";
 import { useBackendHealth } from "@/hooks/useBackendHealth";
+import { useTTS } from "@/hooks/useTTS";
 import { createClient } from "@/lib/supabase/client";
+import { getLibraryMeta, loadPdfFromLibrary, deletePdfFromLibrary, removeLibraryMeta, type PdfMeta } from "@/lib/pdfLibrary";
+
+const PdfViewer = dynamic(() => import("@/components/PdfViewer"), { ssr: false });
 
 const SIDEBAR_MIN = 160;
 const SIDEBAR_MAX = 480;
 const SIDEBAR_DEFAULT = 256;
+
+const CHAT_MIN = 280;
+const CHAT_MAX = 560;
+const CHAT_DEFAULT = 360;
 
 function ChatContent() {
   const searchParams = useSearchParams();
@@ -21,10 +30,20 @@ function ChatContent() {
   const [selectedUnit, setSelectedUnit] = useState<string>("A1-1");
   const [level, setLevel] = useState<"A1" | "A2">("A1");
   const [visitedUnits, setVisitedUnits] = useState<Set<string>>(new Set());
+  const [showPdf, setShowPdf] = useState(false);
+  const [showPdfModal, setShowPdfModal] = useState(false);
+  const [modalLib, setModalLib] = useState<PdfMeta[]>([]);
+  const [openFile, setOpenFile] = useState<File | null>(null);
+  const modalFileInputRef = useRef<HTMLInputElement>(null);
 
   const [user, setUser] = useState<{ name: string; email: string } | null>(null);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
+
+  // PDF text injection state — uses id to re-trigger same text
+  const [injectText, setInjectText] = useState<{ text: string; id: number } | undefined>();
+  // Current PDF page image (base64 JPEG) — passed to Claude as visual context
+  const [pageImage, setPageImage] = useState<string | null>(null);
 
   // Sidebar resize state
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT);
@@ -33,7 +52,15 @@ function ChatContent() {
   const dragStartX = useRef(0);
   const dragStartWidth = useRef(0);
 
+  // Chat panel resize state
+  const [chatWidth, setChatWidth] = useState(CHAT_DEFAULT);
+  const [isChatResizing, setIsChatResizing] = useState(false);
+  const isChatResizingRef = useRef(false);
+  const chatDragStartX = useRef(0);
+  const chatDragStartWidth = useRef(0);
+
   const healthStatus = useBackendHealth();
+  const { speak } = useTTS();
 
   // Initialize from URL params or localStorage (run once on mount)
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -45,6 +72,7 @@ function ChatContent() {
     setSelectedUnit(unit);
     setLevel(lvl as "A1" | "A2");
     setVisitedUnits(new Set([unit]));
+    setShowPdf(localStorage.getItem("lingua_show_pdf") === "true");
     setInitialized(true);
   }, []);
 
@@ -73,12 +101,13 @@ function ChatContent() {
     return () => document.removeEventListener("mousedown", handler);
   }, [showUserMenu]);
 
-  // Persist to localStorage on unit/level change
+  // Persist to localStorage on unit/level/pdf change
   useEffect(() => {
     if (!initialized) return;
     localStorage.setItem("lingua_unit", selectedUnit);
     localStorage.setItem("lingua_level", level);
-  }, [selectedUnit, level, initialized]);
+    localStorage.setItem("lingua_show_pdf", String(showPdf));
+  }, [selectedUnit, level, showPdf, initialized]);
 
   // Sidebar drag-to-resize
   const onDragHandleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -89,17 +118,38 @@ function ChatContent() {
     dragStartWidth.current = sidebarWidth;
   }, [sidebarWidth]);
 
+  // Chat panel drag-to-resize (drag from left edge of chat panel)
+  const onChatDragHandleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isChatResizingRef.current = true;
+    setIsChatResizing(true);
+    chatDragStartX.current = e.clientX;
+    chatDragStartWidth.current = chatWidth;
+  }, [chatWidth]);
+
   useEffect(() => {
     const onMouseMove = (e: MouseEvent) => {
-      if (!isResizingRef.current) return;
-      const delta = e.clientX - dragStartX.current;
-      const next = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, dragStartWidth.current + delta));
-      setSidebarWidth(next);
+      if (isResizingRef.current) {
+        const delta = e.clientX - dragStartX.current;
+        const next = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, dragStartWidth.current + delta));
+        setSidebarWidth(next);
+      }
+      if (isChatResizingRef.current) {
+        // Dragging left increases chat width (delta is negative when moving left)
+        const delta = chatDragStartX.current - e.clientX;
+        const next = Math.max(CHAT_MIN, Math.min(CHAT_MAX, chatDragStartWidth.current + delta));
+        setChatWidth(next);
+      }
     };
     const onMouseUp = () => {
-      if (!isResizingRef.current) return;
-      isResizingRef.current = false;
-      setIsResizing(false);
+      if (isResizingRef.current) {
+        isResizingRef.current = false;
+        setIsResizing(false);
+      }
+      if (isChatResizingRef.current) {
+        isChatResizingRef.current = false;
+        setIsChatResizing(false);
+      }
     };
     document.addEventListener("mousemove", onMouseMove);
     document.addEventListener("mouseup", onMouseUp);
@@ -122,8 +172,6 @@ function ChatContent() {
   const handleSignOut = async () => {
     const supabase = createClient();
     await supabase.auth.signOut();
-    localStorage.removeItem("lingua_unit");
-    localStorage.removeItem("lingua_level");
     router.push("/login");
   };
 
@@ -135,9 +183,11 @@ function ChatContent() {
     });
   };
 
+  const isAnyResizing = isResizing || isChatResizing;
+
   return (
     <div
-      className={`flex h-screen bg-gray-50 flex-col${isResizing ? " select-none cursor-col-resize" : ""}`}
+      className={`flex h-screen bg-gray-50 flex-col${isAnyResizing ? " select-none cursor-col-resize" : ""}`}
     >
       {/* Cold start banner */}
       {(healthStatus === "warming" || healthStatus === "error") && (
@@ -235,7 +285,7 @@ function ChatContent() {
           </div>
         </aside>
 
-        {/* Drag handle */}
+        {/* Sidebar drag handle */}
         <div
           onMouseDown={onDragHandleMouseDown}
           className={`w-1 shrink-0 cursor-col-resize transition-colors ${
@@ -243,25 +293,69 @@ function ChatContent() {
           }`}
         />
 
-        {/* Main chat area */}
-        <main className="flex-1 flex flex-col overflow-hidden">
-          <header className="bg-white border-b border-gray-200 px-6 py-3">
+        {/* PDF viewer area — optional */}
+        {showPdf && (
+          <main className="flex-1 flex flex-col overflow-hidden min-w-0">
+            {initialized && (
+              <PdfViewer
+                onTextSelect={setInjectText}
+                onPageImageChange={setPageImage}
+                speak={speak}
+                openFile={openFile}
+                onClose={() => {
+                  setShowPdf(false);
+                  setPageImage(null);
+                }}
+              />
+            )}
+          </main>
+        )}
+
+        {/* PDF↔Chat drag handle — only when PDF is open */}
+        {showPdf && (
+          <div
+            onMouseDown={onChatDragHandleMouseDown}
+            className={`w-1 shrink-0 cursor-col-resize transition-colors ${
+              isChatResizing ? "bg-blue-400" : "bg-gray-200 hover:bg-blue-300"
+            }`}
+          />
+        )}
+
+        {/* Chat panel */}
+        <section
+          className={`flex flex-col overflow-hidden bg-white${showPdf ? " shrink-0" : " flex-1"}`}
+          style={showPdf ? { width: chatWidth } : undefined}
+        >
+          <header className="bg-white border-b border-gray-200 px-4 py-3 shrink-0">
             <div className="flex items-center gap-3">
               <div>
-                <h2 className="font-semibold text-gray-900">
+                <h2 className="font-semibold text-gray-900 text-sm">
                   {currentUnit?.title ?? "단원 선택"}
                 </h2>
                 <p className="text-xs text-gray-500">
                   {currentUnit?.topics.join(" · ") ?? ""}
                 </p>
               </div>
-              <span className="ml-auto text-xs font-medium bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">
+              <button
+                onClick={() => {
+                  setModalLib(getLibraryMeta());
+                  setShowPdfModal(true);
+                }}
+                title="PDF 보기"
+                className="ml-auto flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 hover:text-gray-700 transition-colors shrink-0"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                PDF 보기
+              </button>
+              <span className="text-xs font-medium bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full shrink-0">
                 {level}
               </span>
             </div>
           </header>
 
-          {/* Persistent chat panels — mounted on first visit, never unmounted */}
+          {/* Persistent chat panels */}
           {initialized &&
             UNITS.filter((u) => visitedUnits.has(u.id)).map((unit) => (
               <div
@@ -273,11 +367,111 @@ function ChatContent() {
                   unitId={unit.id}
                   level={level}
                   textbookId={textbookId}
+                  injectText={injectText}
+                  pageImage={pageImage}
                 />
               </div>
             ))}
-        </main>
+        </section>
       </div>
+
+      {/* PDF picker modal */}
+      {showPdfModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+          onClick={(e) => { if (e.target === e.currentTarget) setShowPdfModal(false); }}
+        >
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md mx-4 overflow-hidden">
+            {/* Modal header */}
+            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+              <h3 className="text-sm font-semibold text-gray-900">PDF 열기</h3>
+              <button
+                onClick={() => setShowPdfModal(false)}
+                className="p-1 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Upload area */}
+            <div className="px-5 pt-4">
+              <input
+                ref={modalFileInputRef}
+                type="file"
+                accept="application/pdf"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (!f) return;
+                  setOpenFile(f);
+                  setShowPdf(true);
+                  setShowPdfModal(false);
+                  e.target.value = "";
+                }}
+              />
+              <button
+                onClick={() => modalFileInputRef.current?.click()}
+                className="w-full flex flex-col items-center gap-2 px-4 py-6 rounded-xl border-2 border-dashed border-gray-200 hover:border-blue-300 hover:bg-blue-50 transition-colors group"
+              >
+                <svg className="w-8 h-8 text-gray-300 group-hover:text-blue-400 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                </svg>
+                <span className="text-sm text-gray-500 group-hover:text-blue-600 transition-colors">PDF 파일 선택</span>
+              </button>
+            </div>
+
+            {/* Recent files list */}
+            {modalLib.length > 0 && (
+              <div className="px-5 py-4">
+                <p className="text-xs font-medium text-gray-400 mb-2">최근 사용한 파일</p>
+                <div className="space-y-1 max-h-52 overflow-y-auto">
+                  {modalLib.map((meta) => (
+                    <div key={meta.name} className="flex items-center gap-1 group">
+                      <button
+                        onClick={async () => {
+                          const f = await loadPdfFromLibrary(meta.name);
+                          if (!f) return;
+                          setOpenFile(f);
+                          setShowPdf(true);
+                          setShowPdfModal(false);
+                        }}
+                        className="flex-1 flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-gray-50 transition-colors text-left min-w-0"
+                      >
+                        <svg className="w-4 h-4 text-red-400 shrink-0" fill="currentColor" viewBox="0 0 24 24">
+                          <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zm-1 1.5L18.5 9H13V3.5zM6 20V4h5v7h7v9H6z" />
+                        </svg>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm text-gray-700 truncate">{meta.name}</p>
+                          <p className="text-xs text-gray-400">{meta.lastOpened ? new Date(meta.lastOpened).toLocaleDateString("ko-KR", { month: "short", day: "numeric" }) : ""}</p>
+                        </div>
+                      </button>
+                      <button
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          await deletePdfFromLibrary(meta.name);
+                          setModalLib(removeLibraryMeta(meta.name));
+                        }}
+                        title="목록에서 삭제"
+                        className="p-1.5 rounded-lg text-gray-300 hover:text-red-500 hover:bg-red-50 transition-all shrink-0"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {modalLib.length === 0 && (
+              <p className="text-xs text-gray-400 text-center pb-5 pt-2">이전에 사용한 파일이 없습니다</p>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

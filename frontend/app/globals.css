@@ -1,3 +1,14 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* react-pdf: prevent canvas from intercepting text selection */
+.react-pdf__Page canvas {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.react-pdf__Page__textContent {
+  user-select: text;
+  -webkit-user-select: text;
+}

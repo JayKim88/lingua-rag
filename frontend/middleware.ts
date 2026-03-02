@@ -26,18 +26,21 @@ export async function middleware(request: NextRequest) {
   );
 
   // IMPORTANT: Use getUser() not getSession() — server-side JWT re-validation
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  let user = null;
+  try {
+    const { data } = await supabase.auth.getUser();
+    user = data.user;
+  } catch {
+    // Supabase unreachable or malformed token — treat as unauthenticated
+  }
 
   const { pathname } = request.nextUrl;
   const isPublic =
     pathname === "/login" || pathname.startsWith("/auth/");
 
   if (!user && !isPublic) {
-    const url = request.nextUrl.clone();
-    url.pathname = "/login";
-    return NextResponse.redirect(url);
+    const loginUrl = new URL("/login", request.url);
+    return NextResponse.redirect(loginUrl);
   }
 
   return supabaseResponse;
