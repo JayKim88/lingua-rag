@@ -6,6 +6,78 @@
 
 ---
 
+## Session: 2026-03-02 23:56
+
+> **Context**: 요약 기능 완성 (InputBar 이동 + summary overlay 독일어 액션 버튼) + summaries Supabase 이전 + RAG 플래그 비활성화 + SSE 빈 응답 / 로그인 500 버그 수정
+
+### Done
+- feat(summary): `MessageList.tsx` — `ChatActionsCtx`, `MARKDOWN_COMPONENTS` export 추가 (summary detail view에서 재사용)
+- feat(summary): `InputBar.tsx` — `onSummary`, `showSummary` props 추가 + "요약하기" 버튼을 볼륨 컨트롤 좌측에 배치 (스트리밍 중 비활성화, summary 열리면 숨김)
+- feat(summary): `ChatPanel.tsx` — `handleSend` 래퍼: `sendMessage` 호출 전 summary overlay 자동 닫기
+- feat(summary): summary detail view — `ChatActionsCtx.Provider` 감싸기로 독일어 텍스트 소리/복사/채팅 주입 버튼 활성화
+- feat(db): `schema.sql` — `summaries` 테이블 + 인덱스 추가 (`user_id`, `unit_id`, `saved_at DESC`)
+- feat(backend): `schemas.py` — `SummaryCreate`, `SummaryOut`, `SummaryListResponse` 추가
+- feat(backend): `repositories.py` — `SummaryRepository` 추가 (`list_by_user_unit`, `create`, `delete`)
+- feat(backend): `routers/summaries.py` 신규 — `GET /api/summaries?unit_id=`, `POST /api/summaries`, `DELETE /api/summaries/{id}`
+- feat(backend): `main.py` — summaries router 등록, `allow_methods` DELETE 추가
+- feat(frontend): `lib/summaries.ts` 전면 교체 — localStorage → Supabase API (async `getSummaries(unitId)`, `saveSummary`, `deleteSummary`)
+- feat(frontend): `app/api/summaries/route.ts`, `app/api/summaries/[id]/route.ts` 신규 — FastAPI 프록시
+- refactor(ChatPanel): 모든 summary 콜백 async로 전환
+- feat(rag): `config.py` — `RAG_ENABLED: bool = False` 플래그 추가
+- fix(rag): `chat.py` — RAG 블록을 `if settings.RAG_ENABLED:` 조건부로 감싸기
+- fix(sse): `chat.py` — `Connection: keep-alive` → `Connection: close` (undici `UND_ERR_SOCKET` 해소)
+- fix(sse): `app/api/chat/route.ts` — ReadableStream 래퍼 제거, `new Response(backendResponse.body)` 직접 파이프 복원 (빈 응답 버그 해소)
+- fix(auth): `middleware.ts` — `supabase.auth.getUser()` try/catch 감싸기 + `new URL("/login", request.url)` 클린 리다이렉트 (500 에러 + `__nextDefaultLocale=` 쿼리 스트링 제거)
+- fix(ux): `chat/page.tsx` — `handleSignOut`에서 `lingua_unit`/`lingua_level` localStorage 삭제 제거 → 재로그인 시 마지막 단원 자동 복원
+
+### Decisions
+- **RAG_ENABLED=False**: Vision(page_image)이 이미 직접 교재 컨텍스트 제공. RAG 추가 레이턴시/비용 대비 명확한 이득 없음. 플래그로 언제든 재활성화 가능
+- **summaries localStorage → Supabase**: 단원별 필터링, 다기기 동기화, 데이터 영속성을 위해 서버 저장소로 전환. unit_id WHERE 절로 쿼리 단계에서 필터링
+- **Connection: close**: FastAPI가 스트리밍 완료 후 연결을 닫을 것임을 undici에 명시 → `UND_ERR_SOCKET` 경고 제거. ReadableStream 래퍼는 역효과(마지막 청크 누락 → 빈 응답)이므로 직접 파이프 유지
+
+### Issues
+- **`UND_ERR_SOCKET: other side closed`**: undici가 FastAPI `Connection: keep-alive`와 실제 연결 종료 간 불일치로 소켓 에러 발생. ReadableStream 래퍼 추가 시 `catch`가 마지막 청크 삼킴 → 빈 채팅 응답. 근본 수정: FastAPI `Connection: close` + 직접 파이프 복원
+- **`GET /login?__nextDefaultLocale= 500`**: `request.nextUrl.clone()`이 스테일 쿼리 파라미터 보존 → Supabase 토큰 파싱 실패. `new URL("/login", request.url)` 사용으로 해결
+- **localhost OAuth → 프로덕션 리다이렉트**: Supabase 대시보드 Redirect URLs에 `http://localhost:3000/**` 미등록이 원인. 코드는 `window.location.origin` 이미 사용 중 → 대시보드 추가로 해결
+
+### Next
+- [ ] Connection: close 적용 후 프로덕션에서 `UND_ERR_SOCKET` 에러 재발 여부 확인 (백엔드 재배포 필요)
+- [ ] Prompt Caching 적용 — 시스템 프롬프트 캐싱으로 비용/레이턴시 감소 (Low effort / High impact)
+- [ ] v0.3 착수 계획 수립 (LLM-as-judge 포맷 검증)
+- [ ] hover 팝업 위치 edge 처리 (페이지 상단 hover → 팝업 뷰포트 위 벗어남)
+
+---
+
+## Session: 2026-03-02 23:54
+
+> **Context**: PDF 뷰어 UX 전면 개선 (hover 검색 패널, 선택적 PDF 패널, 파일 관리 모달) + 채팅 응답 빈 버그 수정
+
+### Done
+- feat(frontend): PDF 검색 패널 → absolute 오버레이로 전환 (hover + Cmd+F, 150ms leave 딜레이)
+- feat(frontend): PDF 패널 선택적 표시 — "PDF 보기" 버튼 클릭 시 중앙 모달로 열기, `showPdf` localStorage 유지
+- feat(frontend): PDF 피커 모달 신규 — 파일 업로드 드롭존 + 최근 파일 목록 + 삭제 기능 (IDB + localStorage 연동)
+- feat(frontend): `lib/pdfLibrary.ts` 신규 — IDB/localStorage 헬퍼 PdfViewer에서 분리 (SSR 안전화)
+- fix(frontend): PDF 열면 채팅창 사라지는 버그 — `flex-1`(flex-basis:0) → `shrink-0 + style.width` 전환
+- fix(frontend): 모달 최근 파일 삭제 버튼 항상 표시 (`opacity-0 group-hover:opacity-100` 제거)
+- fix(backend): `chat.py` `settings` 임포트 누락 수정 — `NameError`로 채팅 응답 완전 빈 현상 해소
+
+### Decisions
+- **`shrink-0` vs `flex-1`**: PDF 표시 시 채팅 섹션에 `flex-1` 유지 → `flex-basis:0`이 inline `width` 덮어써 채팅창 소멸. PDF 표시 중에는 `shrink-0 + style={{ width: chatWidth }}` 사용
+- **`lib/pdfLibrary.ts` 분리**: `page.tsx`에서 PdfViewer static import 시 `react-pdf`가 SSR 실행 → 에러. IDB/localStorage 헬퍼만 순수 TS로 분리, PdfViewer는 `dynamic(..., { ssr: false })` 유지
+
+### Issues
+- **`setState` inside updater**: `setShowPdf(v => { setPageImage(null); return !v; })` — updater 내부의 setState 호출은 React 동작 불안정. 두 호출 분리로 수정
+- **`import` 위치 에러**: pdfjs worker 설정 코드 뒤에 import 배치 → ES 모듈 파싱 실패. 모든 import를 파일 최상단으로 이동
+- **StreamingResponse silent fail**: FastAPI는 200 헤더 전송 후 generator 실행. `try/except` 밖 예외(`NameError`) → 빈 body로 연결 종료. 프론트엔드는 200 OK이지만 빈 응답으로 인식
+
+### Next
+- [ ] 백엔드 재배포 (settings import 버그 수정 반영)
+- [ ] v0.3 착수 계획 수립 (LLM-as-judge 포맷 검증)
+- [ ] 진행률 표시 UX 설계 (완료 단원 처리 방식)
+- [ ] STT 기능 검토 (외부 API vs Web Speech API)
+
+---
+
 ## Session: 2026-02-27 20:14
 
 > **Context**: RAG 인덱싱 품질 개선 — 단원 감지 정확도 100%, 부록 제거, 단원명 교정 후 배포
@@ -36,6 +108,39 @@
 - [ ] v0.3 착수 계획 수립 (LLM-as-judge 포맷 검증)
 - [ ] 진행률 표시 UX 설계 (완료 단원 처리 방식)
 - [ ] STT 기능 검토 (외부 API vs Web Speech API)
+
+---
+
+## Session: 2026-03-02 23:54
+
+> **Context**: PDF 뷰어 hover 팝업 구현 — 독일어 문장 위에 마우스를 올리면 소리/복사/채팅창에 붙여넣기 버튼 팝업
+
+### Done
+- feat(pdf): `PdfViewer.tsx` hover 팝업 구현
+  - `HoverPopup` 인터페이스 + `hoverPopup` state 추가
+  - `hoverShowTimer`(400ms) / `hoverHideTimer`(200-300ms) ref 패턴으로 깜빡임 없는 show/hide
+  - `popupActiveRef`로 선택 팝업 활성 시 hover 팝업 차단
+  - 소리 / 복사 / 채팅창에 붙여넣기 3개 버튼 (버튼 클릭 효과 `active:scale-95` 포함)
+- feat(pdf): `extractSentenceText` — span-level 문장 경계 탐지로 전면 교체
+  - 기존: character-level `.!?` 검색 → 어휘목록 메타데이터(172, ●●●, 번역) 포함 오류
+  - 신규: 인접 span을 읽기 순서로 순회, 한국어/CJK·순수기호·구두점으로 경계 판단
+  - 2-line 문장 처리: `"Welche Dokumente…"` + `"beilegen?"` → 두 span 합쳐서 반환
+- fix(pdf): leaf element 체크 — `childElementCount > 0` 컨테이너 span에서 hover 차단
+- fix(pdf): hover 대상 필터 — 알파벳으로 시작하거나 숫자+알파벳인 span만 허용 (172, ●●●, 한국어 번역 span 제외)
+- fix(pdf): 빠른 마우스 이탈 시 팝업 잔류 버그 수정
+  - non-leaf·비문자 span에서 `clearShow()`만 하고 hide 타이머 미설정 → 팝업 무한 잔류
+  - 해당 케이스에도 `clearHide()` + 200ms hide 타이머 추가
+- fix(pdf): `useEffect` 의존성 배열에 `file` 추가 — PDF 로드 전 이벤트 리스너 등록 누락 해소
+
+### Decisions
+- **span-level 탐지 채택**: character-level 방식은 어휘목록 PDF(번호·기호·번역이 혼재)에서 경계 탐지 불가. span 단위로 한국어/기호를 경계 기준으로 삼는 방식이 PDF 구조에 더 견고함
+- **한국어 span hover 완전 제외**: 독일어 학습 앱 특성상 한국어 번역 span은 소리/복사 대상이 아님. `startsWithLetter` 정규식에서 `\u1100-\uD7FF` 제거
+
+### Next
+- [ ] v0.3 착수 계획 수립 (LLM-as-judge 포맷 검증)
+- [ ] 진행률 표시 UX 설계 (완료 단원 처리 방식)
+- [ ] STT 기능 검토 (외부 API vs Web Speech API)
+- [ ] hover 팝업 위치 edge 처리 — 페이지 상단 span 호버 시 팝업이 뷰포트 위로 벗어나는 경우 하단 표시 fallback 검토
 
 ---
 
