@@ -7,9 +7,10 @@ interface UseChatOptions {
   unitId: string;
   level: "A1" | "A2";
   textbookId: string;
+  pageImage?: string | null;
 }
 
-export function useChat({ unitId, level, textbookId }: UseChatOptions) {
+export function useChat({ unitId, level, textbookId, pageImage }: UseChatOptions) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
@@ -18,6 +19,8 @@ export function useChat({ unitId, level, textbookId }: UseChatOptions) {
   const queue = useRef<string[]>([]);
   const streamingRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
+  // When true, the NEXT processMessage call marks the assistant response as isSummary
+  const summaryRequestRef = useRef(false);
   // Incremented on unit switch to orphan background streams.
   // An orphaned processMessage drains the stream so the backend can persist
   // the assistant message, but stops updating the UI.
@@ -84,6 +87,9 @@ export function useChat({ unitId, level, textbookId }: UseChatOptions) {
       // generationRef.current will differ from myGeneration and we drain
       // without updating UI.
       const myGeneration = generationRef.current;
+      // Consume the summary flag synchronously at call time
+      const isSummary = summaryRequestRef.current;
+      summaryRequestRef.current = false;
 
       streamingRef.current = true;
       setIsStreaming(true);
@@ -94,6 +100,7 @@ export function useChat({ unitId, level, textbookId }: UseChatOptions) {
         role: "user",
         content,
         isStreaming: false,
+        isSummaryRequest: isSummary || undefined,
         createdAt: now,
       };
       const assistantMsgId = crypto.randomUUID();
@@ -119,6 +126,7 @@ export function useChat({ unitId, level, textbookId }: UseChatOptions) {
             unit_id: unitId,
             level,
             textbook_id: textbookId,
+            ...(pageImage ? { page_image: pageImage } : {}),
           }),
           signal: controller.signal,
         });
@@ -215,7 +223,9 @@ export function useChat({ unitId, level, textbookId }: UseChatOptions) {
           abortControllerRef.current = null;
           setMessages((prev) =>
             prev.map((m) =>
-              m.id === assistantMsgId ? { ...m, isStreaming: false } : m
+              m.id === assistantMsgId
+                ? { ...m, isStreaming: false, ...(isSummary ? { isSummary: true } : {}) }
+                : m
             )
           );
           streamingRef.current = false;
@@ -229,7 +239,7 @@ export function useChat({ unitId, level, textbookId }: UseChatOptions) {
         }
       }
     },
-    [unitId, level, textbookId]
+    [unitId, level, textbookId, pageImage]
   );
 
   const sendMessage = useCallback(
@@ -244,5 +254,24 @@ export function useChat({ unitId, level, textbookId }: UseChatOptions) {
     [processMessage]
   );
 
-  return { messages, isStreaming, isLoadingHistory, queueSize, sendMessage };
+  const SUMMARY_PROMPT = `지금까지 나눈 대화를 학습 요약해주세요. 아래 형식을 그대로 사용해주세요:
+
+## 📚 오늘 배운 내용
+이번 세션의 주요 학습 내용을 설명해주세요.
+
+## 🔤 주요 어휘
+대화에서 등장한 독일어 단어와 표현을 정리해주세요.
+
+## 📖 문법 포인트
+다룬 문법 사항을 간략히 정리해주세요.
+
+## 💡 핵심 문장
+기억할 만한 예문을 1~3개 제시해주세요.`;
+
+  const sendSummary = useCallback(() => {
+    summaryRequestRef.current = true;
+    sendMessage(SUMMARY_PROMPT);
+  }, [sendMessage]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return { messages, isStreaming, isLoadingHistory, queueSize, sendMessage, sendSummary };
 }

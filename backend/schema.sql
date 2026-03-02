@@ -59,3 +59,16 @@ CREATE INDEX IF NOT EXISTS idx_document_chunks_unit
 -- CREATE INDEX ON document_chunks
 --     USING ivfflat (embedding vector_cosine_ops)
 --     WITH (lists = 10);
+
+-- Summaries: User-saved chat session summaries
+CREATE TABLE IF NOT EXISTS summaries (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id    UUID NOT NULL,
+    unit_id    VARCHAR(50) NOT NULL,
+    unit_title VARCHAR(255) NOT NULL,
+    content    TEXT NOT NULL,
+    saved_at   TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_summaries_user_unit
+    ON summaries(user_id, unit_id, saved_at DESC);

@@ -186,6 +186,53 @@ class MessageRepository:
         return [_record_to_dict(r) for r in records]
 
 
+class SummaryRepository:
+    """CRUD operations for summaries table."""
+
+    async def list_by_user_unit(self, user_id: UUID, unit_id: str) -> list[dict]:
+        """Return all summaries for a (user, unit), newest first."""
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            records = await conn.fetch(
+                """
+                SELECT * FROM summaries
+                WHERE user_id = $1 AND unit_id = $2
+                ORDER BY saved_at DESC
+                """,
+                user_id,
+                unit_id,
+            )
+        return [_record_to_dict(r) for r in records]
+
+    async def create(self, user_id: UUID, body) -> dict:
+        """Insert a new summary and return the record."""
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            record = await conn.fetchrow(
+                """
+                INSERT INTO summaries (id, user_id, unit_id, unit_title, content, saved_at)
+                VALUES (gen_random_uuid(), $1, $2, $3, $4, NOW())
+                RETURNING *
+                """,
+                user_id,
+                body.unit_id,
+                body.unit_title,
+                body.content,
+            )
+        return _record_to_dict(record)
+
+    async def delete(self, user_id: UUID, summary_id: UUID) -> bool:
+        """Delete a summary owned by user_id. Returns True if a row was deleted."""
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM summaries WHERE id = $1 AND user_id = $2",
+                summary_id,
+                user_id,
+            )
+        return result != "DELETE 0"
+
+
 class VectorSearchRepository:
     """pgvector similarity search for RAG (v0.2)."""
 

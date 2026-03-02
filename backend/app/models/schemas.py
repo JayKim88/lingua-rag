@@ -31,6 +31,10 @@ class ChatRequest(BaseModel):
         default=False,
         description="If True, always starts a new conversation thread.",
     )
+    page_image: Optional[str] = Field(
+        default=None,
+        description="Base64-encoded JPEG of the current PDF page for visual context.",
+    )
 
     model_config = {"json_schema_extra": {"example": {
         "message": "sein 동사의 현재형 변화를 알려주세요",
@@ -75,3 +79,27 @@ class MessagesResponse(BaseModel):
 
     conversation_id: UUID
     messages: list[MessageOut]
+
+
+class SummaryCreate(BaseModel):
+    """Request body for POST /api/summaries."""
+
+    unit_id: str = Field(..., max_length=50)
+    unit_title: str = Field(..., max_length=255)
+    content: str = Field(..., min_length=1)
+
+
+class SummaryOut(BaseModel):
+    """A single summary record."""
+
+    id: UUID
+    unit_id: str
+    unit_title: str
+    content: str
+    saved_at: str
+
+
+class SummaryListResponse(BaseModel):
+    """Response for GET /api/summaries."""
+
+    summaries: list[SummaryOut]

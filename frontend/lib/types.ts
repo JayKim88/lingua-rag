@@ -4,7 +4,17 @@ export interface Message {
   content: string;
   isStreaming: boolean;
   isTruncated?: boolean;
+  isSummary?: boolean;        // AI response that is a session summary
+  isSummaryRequest?: boolean; // user message that triggered the summary
   createdAt?: string; // ISO 8601 string
+}
+
+export interface SavedSummary {
+  id: string;
+  unitId: string;
+  unitTitle: string;
+  content: string;
+  savedAt: string; // ISO 8601
 }
 
 export interface Unit {
