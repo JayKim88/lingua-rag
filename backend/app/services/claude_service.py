@@ -44,6 +44,7 @@ class ClaudeService:
         level: str,
         textbook_id: str,
         rag_chunks: list[str] | None = None,
+        page_image: str | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
         Stream Claude's response as SSE-compatible events.
@@ -71,7 +72,7 @@ class ClaudeService:
             system_prompt += f"\n\n## 교재 원문 참고\n\n{joined}"
 
         # Build message list for Claude (history + current user message)
-        messages = _build_messages(history, user_message)
+        messages = _build_messages(history, user_message, page_image=page_image)
 
         last_error: Exception | None = None
         for attempt in range(MAX_RETRIES):
@@ -116,7 +117,7 @@ class ClaudeService:
     async def _stream_once(
         self,
         system_prompt: str,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
         Perform a single streaming call to Claude.
@@ -145,20 +146,37 @@ class ClaudeService:
 def _build_messages(
     history: list[dict[str, Any]],
     user_message: str,
-) -> list[dict[str, str]]:
+    page_image: str | None = None,
+) -> list[dict[str, Any]]:
     """
     Build the messages array for the Claude API call.
 
     Combines conversation history (already limited to last 10) with
-    the current user message.
+    the current user message.  When page_image is provided the user
+    turn becomes a multimodal content block (image + text).
 
     Anthropic requires messages to alternate user/assistant and
     the array must start with a user message.
     """
-    result: list[dict[str, str]] = []
+    result: list[dict[str, Any]] = []
 
     for msg in history:
         result.append({"role": msg["role"], "content": msg["content"]})
 
-    result.append({"role": "user", "content": user_message})
+    if page_image:
+        content: Any = [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": page_image,
+                },
+            },
+            {"type": "text", "text": user_message},
+        ]
+    else:
+        content = user_message
+
+    result.append({"role": "user", "content": content})
     return result

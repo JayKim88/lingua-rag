@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     # OpenAI — Embeddings API for RAG (v0.2)
     OPENAI_API_KEY: str = ""
 
+    # RAG — set to True to enable vector search context injection
+    RAG_ENABLED: bool = False
+
     # App
     ENVIRONMENT: str = "development"
     LOG_LEVEL: str = "INFO"

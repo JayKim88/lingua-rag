@@ -24,6 +24,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
+from app.core.config import settings
 from app.db.repositories import ConversationRepository, MessageRepository, VectorSearchRepository
 from app.deps.auth import get_current_user
 from app.models.schemas import ChatRequest
@@ -134,21 +135,23 @@ async def chat_endpoint(
             )
 
             # RAG: embed user message → search similar chunks → inject context
+            # Disabled when RAG_ENABLED=False (default). Enable via env var.
             rag_chunks: list[str] = []
-            try:
-                embedding_svc = get_embedding_service()
-                query_vec = await embedding_svc.embed(body.message)
-                results = await vector_repo.search(
-                    query_embedding=query_vec,
-                    textbook_id=textbook_id,
-                    unit_id=unit_id,
-                    limit=3,
-                )
-                rag_chunks = [r["content"] for r in results]
-                if rag_chunks:
-                    logger.info("RAG: found %d chunks for unit %s (distances logged at debug)", len(rag_chunks), unit_id)
-            except Exception as exc:
-                logger.warning("RAG search failed, using base prompt: %s", exc)
+            if settings.RAG_ENABLED:
+                try:
+                    embedding_svc = get_embedding_service()
+                    query_vec = await embedding_svc.embed(body.message)
+                    results = await vector_repo.search(
+                        query_embedding=query_vec,
+                        textbook_id=textbook_id,
+                        unit_id=unit_id,
+                        limit=3,
+                    )
+                    rag_chunks = [r["content"] for r in results]
+                    if rag_chunks:
+                        logger.info("RAG: found %d chunks for unit %s (distances logged at debug)", len(rag_chunks), unit_id)
+                except Exception as exc:
+                    logger.warning("RAG search failed, using base prompt: %s", exc)
 
             # 5. Stream from Claude
             try:
@@ -159,6 +162,7 @@ async def chat_endpoint(
                     level=level,
                     textbook_id=textbook_id,
                     rag_chunks=rag_chunks or None,
+                    page_image=body.page_image or None,
                 ):
                     if event["type"] == "token":
                         full_response += event["content"]
@@ -205,6 +209,6 @@ async def chat_endpoint(
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
+            "Connection": "close",
         },
     )
