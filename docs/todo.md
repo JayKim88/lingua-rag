@@ -12,16 +12,15 @@
 
 ## 즉시 (Low effort / High impact)
 
-- [ ] **Prompt Caching 적용** (Ch. 9)
-  - `claude_service.py`에서 system prompt 고정 prefix에 `cache_control: ephemeral` 추가
-  - 대상: 역할 선언 + ANSWER_FORMAT + 56-unit 요약 테이블 (~1,500 tokens)
-  - 예상 효과: 요청당 비용 -60~90%, 첫 토큰 지연 -31~79%
+- [x] **Prompt Caching 적용** (Ch. 9) — 2026-03-03
+  - `claude_service.py`: fixed_prefix(~1,300 tokens)에 `cache_control: ephemeral` 적용
+  - fixed_prefix = TUTOR_ROLE + level modifier + UNIT_SUMMARY_TABLE (동일 레벨 요청 간 공유)
   - 검증: Anthropic 대시보드의 `cache_read_input_tokens` 확인
 
-- [ ] **"Lost in the Middle" 프롬프트 구조 개선** (Ch. 5)
-  - `prompts.py`에서 현재 단원 상세 + RAG chunks를 prompt 앞쪽으로, 56-unit 테이블을 뒤쪽으로 재배치
-  - 근거: 모델은 긴 컨텍스트 중간 정보를 가장 잘 참조하지 못함 (Liu et al., 2023)
-  - 검증: 동일 질문에 대한 응답 품질 체감 비교
+- [x] **"Lost in the Middle" 프롬프트 구조 개선** (Ch. 5) — 2026-03-03
+  - RAG chunks를 dynamic_suffix 앞에 prepend (기존: 뒤에 append)
+  - 캐싱 구조 유지 (UNIT_SUMMARY_TABLE 이동 없이 dynamic 내 순서만 조정)
+  - 근거: Liu et al. 2023 — 모델은 컨텍스트 전환 직후(시작)에 가장 집중함
 
 ---
 
