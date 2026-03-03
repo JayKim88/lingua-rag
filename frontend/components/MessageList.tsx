@@ -105,11 +105,9 @@ function LineWithActions({ children }: { children: React.ReactNode }) {
       .trim();
     if (germanBold) return germanBold;
 
-    // Fallback: strip Korean characters from the full text
-    return base
-      .replace(/[\u1100-\uD7FF\u4E00-\u9FFF\u3040-\u30FF]+/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
+    // Fallback: extract Latin word sequences (German words in Korean-medium text)
+    const latinWords = base.match(/[a-zA-ZÀ-ÖØ-öø-ÿ]+/g) ?? [];
+    return latinWords.join(" ");
   };
 
   const handleCopy = () => {
@@ -208,6 +206,19 @@ function ParagraphRenderer({ children }: { children: React.ReactNode }) {
 export const MARKDOWN_COMPONENTS: Partial<Components> = {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   p: ({ node: _node, ...props }) => <ParagraphRenderer>{props.children}</ParagraphRenderer>,
+  // Tight lists render inline content directly in <li> (no <p> wrapper).
+  // Loose lists wrap content in <p> which is already handled above.
+  // Only apply LineWithActions when children do NOT already contain ParagraphRenderer.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  li: ({ node: _node, ...props }) => {
+    const kids = Children.toArray(props.children);
+    const hasBlock = kids.some((c) => isValidElement(c) && c.type === ParagraphRenderer);
+    return (
+      <li>
+        {hasBlock ? props.children : <LineWithActions>{props.children}</LineWithActions>}
+      </li>
+    );
+  },
 };
 
 // ---------------------------------------------------------------------------

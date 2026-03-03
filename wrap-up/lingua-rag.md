@@ -37,8 +37,44 @@
 - [ ] Hover popup edge positioning — popup overflows viewport top when hovering near top of page (fallback to display below)
 - [ ] Run notes table migration in Supabase SQL editor (production)
 - [ ] Verify `Connection: close` fix in production — check for `UND_ERR_SOCKET` recurrence
-- [ ] Apply Prompt Caching — reduce cost/latency for system prompt
-- [ ] Plan v0.3 kickoff (LLM-as-judge format validation)
+- [x] Apply Prompt Caching — reduce cost/latency for system prompt
+- [x] Plan v0.3 kickoff (LLM-as-judge format validation)
+
+---
+
+## Session: 2026-03-03 23:41
+
+> **Context**: LLM-as-Judge 평가 시스템 구축 (v0.3 Phase 1) + getText() fallback 개선 + tight list hover fix
+
+### Done
+- fix(frontend): `MessageList.tsx` — add `li` override to `MARKDOWN_COMPONENTS` (tight list items now wrapped in `LineWithActions`; loose lists with `ParagraphRenderer` children pass through unchanged)
+- feat(eval): `scripts/test_questions.json` — 10개 고정 테스트 질문 (단원별 포맷 유혹 케이스 포함)
+- feat(eval): `scripts/evaluate.py` — LLM-as-judge runner
+  - 6규칙: german_bold_complete, no_markdown_table, translation_inline, dialogue_structure, example_length_ok, tip_included
+  - Judge: claude-sonnet-4-6 (Haiku → Sonnet 업그레이드)
+  - `_parse_judge_json()`: markdown fence 제거 + JSON boundary fallback + retry
+  - 출력: 콘솔 리포트 + `scripts/results/YYYY-MM-DD_HHMM.json`
+- fix(prompts): `backend/app/data/prompts.py` — ANSWER_FORMAT bold 규칙 강화
+  - 추가 예시: 괄호 안 (`남성 명사(**der**)는`), 헤딩 (`## **kein** / **keine**`), 국가명 (`**Deutschland**`), 형태소 (`**ge-** + **-t**`)
+- chore(eval): Baseline 실행 → 프롬프트 개선 후 83.3% → 90.0% 달성
+- docs: `docs/todo.md` — 완료 항목 [x] 체크, v0.3 완료 항목 통합 갱신
+- refactor(frontend): `MessageList.tsx` `getText()` fallback 개선 — Korean strip → Latin 단어 시퀀스 추출 (`/[a-zA-ZÀ-ÖØ-öø-ÿ]+/g`)
+
+### Decisions
+- **`getText()` Latin extraction**: 이 앱 컨텍스트에서 Latin 문자 = 독일어 (고신뢰). Korean strip은 기호/숫자 잔여물 남김 → Latin 추출이 더 안전
+- **`<strong>` = 의미적 독일어 마커**: Bold는 TTS 추출 메커니즘. LLM 준수율 개선이 근본 해결책이며, `<strong>` 1순위 + Latin 추출 fallback 구조 유지
+- **Judge Sonnet 업그레이드**: Haiku는 어휘 목록 bold 여부 등에서 false positive 발생. Sonnet 교체 후 정확도 향상
+
+### Issues
+- **Judge JSON malformed**: 한국어 reason에 특수문자 포함 시 JSON string delimiter 오류 → `_parse_judge_json()` fallback + "reason은 한 줄 문자열" 지시로 완화
+- **Judge self-contradiction**: reason이 PASS 설명인데 `pass: false` 반환 (q04, q10). "pass 값과 reason 일치" 지시 추가로 부분 완화
+
+### Next
+- [ ] User Feedback UI — 응답 하단 👍/👎 버튼 + `message_feedback` DB 테이블 (v0.3 Phase 2)
+- [ ] 실사용자 확보 — 채널 선정 (Reddit r/German, Discord, Naver 카페)
+- [ ] Hover popup edge positioning — viewport top 오버플로우 시 아래 표시 fallback
+- [ ] Run notes table migration in Supabase SQL editor (production)
+- [ ] Verify `Connection: close` fix in production
 
 ---
 
