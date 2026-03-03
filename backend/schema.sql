@@ -72,3 +72,16 @@ CREATE TABLE IF NOT EXISTS summaries (
 
 CREATE INDEX IF NOT EXISTS idx_summaries_user_unit
     ON summaries(user_id, unit_id, saved_at DESC);
+
+-- Notes: User-written free-form study notes
+CREATE TABLE IF NOT EXISTS notes (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id    UUID NOT NULL,
+    unit_id    VARCHAR(50) NOT NULL,
+    unit_title VARCHAR(255) NOT NULL,
+    content    TEXT NOT NULL,
+    saved_at   TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_notes_user_unit
+    ON notes(user_id, unit_id, saved_at DESC);

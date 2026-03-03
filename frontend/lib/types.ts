@@ -17,6 +17,14 @@ export interface SavedSummary {
   savedAt: string; // ISO 8601
 }
 
+export interface SavedNote {
+  id: string;
+  unitId: string;
+  unitTitle: string;
+  content: string;
+  savedAt: string; // ISO 8601
+}
+
 export interface Unit {
   id: string;
   title: string;

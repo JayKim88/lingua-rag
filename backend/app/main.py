@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.db.connection import close_db_pool, get_pool, init_db_pool
-from app.routers import chat, conversations, health, summaries
+from app.routers import chat, conversations, health, notes, summaries
 
 logging.basicConfig(
     level=logging.INFO,
@@ -97,3 +97,4 @@ app.include_router(health.router, prefix="/api", tags=["Health"])
 app.include_router(chat.router, prefix="/api", tags=["Chat"])
 app.include_router(conversations.router, prefix="/api", tags=["Conversations"])
 app.include_router(summaries.router, prefix="/api", tags=["Summaries"])
+app.include_router(notes.router, prefix="/api", tags=["Notes"])

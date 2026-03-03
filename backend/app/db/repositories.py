@@ -233,6 +233,53 @@ class SummaryRepository:
         return result != "DELETE 0"
 
 
+class NoteRepository:
+    """CRUD operations for notes table."""
+
+    async def list_by_user_unit(self, user_id: UUID, unit_id: str) -> list[dict]:
+        """Return all notes for a (user, unit), newest first."""
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            records = await conn.fetch(
+                """
+                SELECT * FROM notes
+                WHERE user_id = $1 AND unit_id = $2
+                ORDER BY saved_at DESC
+                """,
+                user_id,
+                unit_id,
+            )
+        return [_record_to_dict(r) for r in records]
+
+    async def create(self, user_id: UUID, body) -> dict:
+        """Insert a new note and return the record."""
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            record = await conn.fetchrow(
+                """
+                INSERT INTO notes (id, user_id, unit_id, unit_title, content, saved_at)
+                VALUES (gen_random_uuid(), $1, $2, $3, $4, NOW())
+                RETURNING *
+                """,
+                user_id,
+                body.unit_id,
+                body.unit_title,
+                body.content,
+            )
+        return _record_to_dict(record)
+
+    async def delete(self, user_id: UUID, note_id: UUID) -> bool:
+        """Delete a note owned by user_id. Returns True if a row was deleted."""
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM notes WHERE id = $1 AND user_id = $2",
+                note_id,
+                user_id,
+            )
+        return result != "DELETE 0"
+
+
 class VectorSearchRepository:
     """pgvector similarity search for RAG (v0.2)."""
 

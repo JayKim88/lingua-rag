@@ -103,3 +103,27 @@ class SummaryListResponse(BaseModel):
     """Response for GET /api/summaries."""
 
     summaries: list[SummaryOut]
+
+
+class NoteCreate(BaseModel):
+    """Request body for POST /api/notes."""
+
+    unit_id: str = Field(..., max_length=50)
+    unit_title: str = Field(..., max_length=255)
+    content: str = Field(..., min_length=1)
+
+
+class NoteOut(BaseModel):
+    """A single note record."""
+
+    id: UUID
+    unit_id: str
+    unit_title: str
+    content: str
+    saved_at: str
+
+
+class NoteListResponse(BaseModel):
+    """Response for GET /api/notes."""
+
+    notes: list[NoteOut]
