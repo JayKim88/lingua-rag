@@ -81,10 +81,35 @@ function LineWithActions({ children }: { children: React.ReactNode }) {
   const hasSplit = secondary !== null && primary.length > 0;
 
   const getText = () => {
-    const raw = primaryRef.current?.textContent?.trim() ?? "";
+    const el = primaryRef.current;
+    if (!el) return "";
+    const raw = el.textContent?.trim() ?? "";
     // Strip speaker prefix: "A: ", "B: " etc. (single uppercase letter + colon)
-    const stripped = raw.replace(/^[A-Z]:\s*/, "").trim();
-    return stripped || raw;
+    const base = raw.replace(/^[A-Z]:\s*/, "").trim() || raw;
+
+    // If no Korean in the text, return as-is
+    const KOREAN_RE = /[\u1100-\uD7FF\u4E00-\u9FFF\u3040-\u30FF]/;
+    if (!KOREAN_RE.test(base)) return base;
+
+    // Mixed Korean+German: prefer bold/em elements that contain Latin text
+    const STRIP_KOREAN = (t: string) =>
+      t.replace(/[\u1100-\uD7FF\u4E00-\u9FFF\u3040-\u30FF]+/g, " ").replace(/\s+/g, " ").trim();
+    const boldEls = Array.from(el.querySelectorAll("strong, em"));
+    const germanBold = boldEls
+      .map((b) => {
+        const t = b.textContent?.trim() ?? "";
+        return KOREAN_RE.test(t) ? STRIP_KOREAN(t) : t;
+      })
+      .filter((t) => /[a-zA-ZÀ-ÖØ-öø-ÿ]/.test(t))
+      .join(" ")
+      .trim();
+    if (germanBold) return germanBold;
+
+    // Fallback: strip Korean characters from the full text
+    return base
+      .replace(/[\u1100-\uD7FF\u4E00-\u9FFF\u3040-\u30FF]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
   };
 
   const handleCopy = () => {

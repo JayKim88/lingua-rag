@@ -90,6 +90,7 @@ export function useChat({ unitId, level, textbookId, pageImage }: UseChatOptions
       // Consume the summary flag synchronously at call time
       const isSummary = summaryRequestRef.current;
       summaryRequestRef.current = false;
+      let wasAborted = false;
 
       streamingRef.current = true;
       setIsStreaming(true);
@@ -199,6 +200,7 @@ export function useChat({ unitId, level, textbookId, pageImage }: UseChatOptions
         }
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") {
+          wasAborted = true;
           return;
         }
         if (generationRef.current === myGeneration) {
@@ -224,7 +226,14 @@ export function useChat({ unitId, level, textbookId, pageImage }: UseChatOptions
           setMessages((prev) =>
             prev.map((m) =>
               m.id === assistantMsgId
-                ? { ...m, isStreaming: false, ...(isSummary ? { isSummary: true } : {}) }
+                ? {
+                    ...m,
+                    isStreaming: false,
+                    ...(isSummary ? { isSummary: true } : {}),
+                    ...(wasAborted
+                      ? { content: (m.content ? m.content + "\n\n" : "") + "_응답이 취소되었습니다._" }
+                      : {}),
+                  }
                 : m
             )
           );
@@ -273,5 +282,11 @@ export function useChat({ unitId, level, textbookId, pageImage }: UseChatOptions
     sendMessage(SUMMARY_PROMPT);
   }, [sendMessage]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  return { messages, isStreaming, isLoadingHistory, queueSize, sendMessage, sendSummary };
+  const cancelMessage = useCallback(() => {
+    queue.current = [];
+    setQueueSize(0);
+    abortControllerRef.current?.abort();
+  }, []);
+
+  return { messages, isStreaming, isLoadingHistory, queueSize, sendMessage, sendSummary, cancelMessage };
 }

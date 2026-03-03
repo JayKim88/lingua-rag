@@ -237,6 +237,9 @@ export default function PdfViewer({
   const hoverShowTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hoverHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const popupActiveRef = useRef(false);
+  // After selection popup dismisses, block hover until mouse moves ≥ HOVER_BLOCK_DIST px
+  const hoverBlockOriginRef = useRef<{ x: number; y: number } | null>(null);
+  const HOVER_BLOCK_DIST = 50;
 
   // Open file passed from parent (modal selection)
   useEffect(() => {
@@ -352,10 +355,14 @@ export default function PdfViewer({
     };
   }, [searchQuery, numPages]);
 
-  // Keep popupActiveRef in sync so the hover effect closure sees current value
+  // Keep popupActiveRef in sync so the hover effect closure sees current value.
+  // When selection popup opens: cancel any pending hover show timer + clear hover state.
   useEffect(() => {
     popupActiveRef.current = popup !== null;
-    if (popup !== null) setHoverPopup(null);
+    if (popup !== null) {
+      if (hoverShowTimer.current) clearTimeout(hoverShowTimer.current);
+      setHoverPopup(null);
+    }
   }, [popup]);
 
   // Extract the sentence containing the hovered span from the PDF text layer.
@@ -379,8 +386,17 @@ export default function PdfViewer({
     // Skip spans with no alphabetic content (page numbers, bullet dots, etc.)
     if (!hasAlpha(rawText)) return "";
 
-    // For Korean/CJK spans return just that span's text
-    if (isKoreanOrCJK(rawText)) return rawText;
+    const hasLatin = (t: string) => /[a-zA-ZÀ-ÖØ-öø-ÿ]/.test(t);
+
+    // For Korean/CJK-only spans: return raw text
+    // For mixed German+Korean spans: strip Korean portion so popup shows only German
+    if (isKoreanOrCJK(rawText)) {
+      if (!hasLatin(rawText)) return rawText;
+      return rawText
+        .replace(/[\u1100-\uD7FF\u4E00-\u9FFF\u3040-\u30FF]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
 
     // Collect all visible spans sorted by reading order (top→bottom, left→right)
     const allSpans = Array.from(textLayer.querySelectorAll("span")).filter(
@@ -444,6 +460,16 @@ export default function PdfViewer({
     };
 
     const handleMouseMove = (e: MouseEvent) => {
+      // Hover blocked after selection popup dismisses — wait until mouse moves far enough
+      if (hoverBlockOriginRef.current) {
+        const dx = e.clientX - hoverBlockOriginRef.current.x;
+        const dy = e.clientY - hoverBlockOriginRef.current.y;
+        if (dx * dx + dy * dy < HOVER_BLOCK_DIST * HOVER_BLOCK_DIST) {
+          clearShow();
+          return;
+        }
+        hoverBlockOriginRef.current = null;
+      }
       if (popupActiveRef.current) return;
       const el = document.elementFromPoint(e.clientX, e.clientY);
       // If cursor is over the hover popup itself, cancel show timer only.
@@ -471,13 +497,12 @@ export default function PdfViewer({
         hoverHideTimer.current = setTimeout(() => setHoverPopup(null), 200);
         return;
       }
-      // Only trigger if span starts with a letter, or starts with a digit that
-      // contains letters (e.g. "3D-Drucker"). Skips page numbers, bullet dots, etc.
+      // Only trigger if span contains a Latin letter.
+      // Previously required starting with a letter, which blocked spans like
+      // "Ⓐ Aus welchem Land kommst du?" where Ⓐ (U+24B6) is not in the ASCII range.
       const spanText = (el.textContent ?? "").trim();
-      const startsWithLetter = /^[a-zA-ZÀ-ÖØ-öø-ÿ]/.test(spanText);
-      const startsWithDigitButHasLetter =
-        /^\d/.test(spanText) && /[a-zA-ZÀ-ÖØ-öø-ÿ]/.test(spanText);
-      if (!startsWithLetter && !startsWithDigitButHasLetter) {
+      const hasLatinLetter = /[a-zA-ZÀ-ÖØ-öø-ÿ]/.test(spanText);
+      if (!hasLatinLetter) {
         clearShow();
         clearHide();
         hoverHideTimer.current = setTimeout(() => setHoverPopup(null), 200);
@@ -486,8 +511,10 @@ export default function PdfViewer({
       clearHide();
       clearShow();
       hoverShowTimer.current = setTimeout(() => {
+        if (popupActiveRef.current) return;
         const text = extractSentenceText(el);
-        if (text) setHoverPopup({ x: e.clientX, y: e.clientY, text });
+        if (text && /[a-zA-ZÀ-ÖØ-öø-ÿ]/.test(text))
+          setHoverPopup({ x: e.clientX, y: e.clientY, text });
       }, 400);
     };
 
@@ -525,7 +552,13 @@ export default function PdfViewer({
   useEffect(() => {
     const handleMouseDown = (e: MouseEvent) => {
       const popupEl = document.getElementById("pdf-selection-popup");
-      if (popupEl && !popupEl.contains(e.target as Node)) setPopup(null);
+      if (popupEl && !popupEl.contains(e.target as Node)) {
+        hoverBlockOriginRef.current = { x: e.clientX, y: e.clientY };
+        setPopup(null);
+      }
+
+      const hoverPopupEl = document.getElementById("pdf-hover-popup");
+      if (hoverPopupEl && !hoverPopupEl.contains(e.target as Node)) setHoverPopup(null);
 
       const textLayer = containerRef.current?.querySelector(
         ".react-pdf__Page__textContent",
@@ -1206,10 +1239,8 @@ export default function PdfViewer({
           }}
         >
           <button
-            onMouseDown={(e) => {
-              e.preventDefault();
-              speak(hoverPopup.text);
-            }}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => speak(hoverPopup.text)}
             className="px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50 active:bg-gray-200 active:scale-95 transition-all flex items-center gap-1.5"
             title="소리 내어 읽기"
           >
@@ -1224,8 +1255,8 @@ export default function PdfViewer({
           </button>
           <div className="w-px bg-gray-200" />
           <button
-            onMouseDown={(e) => {
-              e.preventDefault();
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
               navigator.clipboard.writeText(hoverPopup.text);
               setHoverPopup(null);
             }}
@@ -1250,13 +1281,13 @@ export default function PdfViewer({
           </button>
           <div className="w-px bg-gray-200" />
           <button
-            onMouseDown={(e) => {
-              e.preventDefault();
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
               onTextSelect({ text: hoverPopup.text, id: Date.now() });
               setHoverPopup(null);
             }}
             className="px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-50 active:bg-blue-200 active:scale-95 transition-all flex items-center gap-1.5"
-            title="채팅창에 붙여넣기"
+            title="질문하기"
           >
             <svg
               className="w-3.5 h-3.5"
@@ -1271,7 +1302,7 @@ export default function PdfViewer({
                 d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"
               />
             </svg>
-            채팅창에 붙여넣기
+            질문하기
           </button>
         </div>
       )}
@@ -1285,15 +1316,36 @@ export default function PdfViewer({
             left: Math.min(popup.x - 4, window.innerWidth - 200),
             top: popup.y - 48,
           }}
+          onMouseLeave={(e) => {
+            hoverBlockOriginRef.current = { x: e.clientX, y: e.clientY };
+            setPopup(null);
+            window.getSelection()?.removeAllRanges();
+          }}
         >
           <button
-            onMouseDown={(e) => {
-              e.preventDefault();
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => speak(popup.text)}
+            className="px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50 active:bg-gray-200 active:scale-95 transition-all flex items-center gap-1.5"
+          >
+            <svg
+              className="w-3.5 h-3.5"
+              fill="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z" />
+            </svg>
+            소리
+          </button>
+          <div className="w-px bg-gray-200" />
+          <button
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={(e) => {
+              hoverBlockOriginRef.current = { x: e.clientX, y: e.clientY };
               onTextSelect({ text: popup.text, id: Date.now() });
               setPopup(null);
               window.getSelection()?.removeAllRanges();
             }}
-            className="px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-50 transition-colors flex items-center gap-1.5"
+            className="px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-50 active:bg-blue-200 active:scale-95 transition-all flex items-center gap-1.5"
           >
             <svg
               className="w-3.5 h-3.5"
@@ -1309,25 +1361,6 @@ export default function PdfViewer({
               />
             </svg>
             질문하기
-          </button>
-          <div className="w-px bg-gray-200" />
-          <button
-            onMouseDown={(e) => {
-              e.preventDefault();
-              speak(popup.text);
-              setPopup(null);
-              window.getSelection()?.removeAllRanges();
-            }}
-            className="px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors flex items-center gap-1.5"
-          >
-            <svg
-              className="w-3.5 h-3.5"
-              fill="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z" />
-            </svg>
-            읽기
           </button>
         </div>
       )}
