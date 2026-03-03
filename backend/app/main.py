@@ -29,25 +29,28 @@ async def lifespan(app: FastAPI):
     await init_db_pool()
     logger.info("Database pool initialized.")
     # Orphan cleanup: remove user messages older than 1 hour with no assistant reply.
-    # These are left by process crashes after saving the user turn but before the
-    # assistant response was saved.
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        deleted = await conn.execute("""
-            DELETE FROM messages
-            WHERE id IN (
-                SELECT m.id FROM messages m
-                WHERE m.role = 'user'
-                  AND m.created_at < NOW() - INTERVAL '1 hour'
-                  AND NOT EXISTS (
-                      SELECT 1 FROM messages m2
-                      WHERE m2.conversation_id = m.conversation_id
-                        AND m2.role = 'assistant'
-                        AND m2.created_at > m.created_at
-                  )
-            )
-        """)
-        logger.info("Startup: orphaned user turns cleaned up: %s", deleted)
+    # Wrapped in try/except so a transient DB hiccup at startup does not prevent the
+    # app from binding its port (which would cause Render to kill the process).
+    try:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            deleted = await conn.execute("""
+                DELETE FROM messages
+                WHERE id IN (
+                    SELECT m.id FROM messages m
+                    WHERE m.role = 'user'
+                      AND m.created_at < NOW() - INTERVAL '1 hour'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM messages m2
+                          WHERE m2.conversation_id = m.conversation_id
+                            AND m2.role = 'assistant'
+                            AND m2.created_at > m.created_at
+                      )
+                )
+            """)
+            logger.info("Startup: orphaned user turns cleaned up: %s", deleted)
+    except Exception as exc:
+        logger.warning("Startup: orphan cleanup skipped (DB unavailable at boot): %s", exc)
     yield
     logger.info("Shutting down LinguaRAG backend...")
     await close_db_pool()
