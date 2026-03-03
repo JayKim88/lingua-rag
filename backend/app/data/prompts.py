@@ -176,54 +176,46 @@ def _build_constraints(level: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Main builder
+# Main builder (returns two parts for prompt caching)
 # ---------------------------------------------------------------------------
 
-def build_system_prompt(
+def build_system_prompt_parts(
     level: str,
     unit_id: str,
     unit_data: Optional[dict[str, Any]],
-) -> str:
+) -> tuple[str, str]:
     """
-    Build the full system prompt for a given level and unit.
+    Build the system prompt split into a cacheable prefix and a dynamic suffix.
 
-    Structure:
-      1. Tutor role
-      2. Level modifier
-      3. 56-unit summary table
-      4. Current unit detail (or default note if unit not found)
-      5. Answer format
-      6. Constraints
+    Cacheable prefix (Layers 1-3, ~1,300 tokens):
+      Identical across all requests for the same level → high cache hit rate.
 
-    Args:
-        level: "A1" or "A2"
-        unit_id: e.g. "A1-3"
-        unit_data: Unit dict from DOKDOKDOK_A1 lookup (or None)
+    Dynamic suffix (Layers 4-6, ~500 tokens):
+      Changes per unit; never cached.
 
     Returns:
-        Complete system prompt string.
+        (fixed_prefix, dynamic_suffix)
     """
     config = LEVEL_CONFIG.get(level, LEVEL_CONFIG["A1"])
 
-    # Layer 1: Tutor role
-    parts = [TUTOR_ROLE]
-
-    # Layer 2: Level modifier
-    parts.append(
+    # --- Cacheable prefix: Layers 1-3 ---
+    fixed_parts = [
+        TUTOR_ROLE,
         f"\n## 학습자 레벨: {level} ({config['description']})\n\n"
-        f"{config['system_prompt_modifier']}"
-    )
+        f"{config['system_prompt_modifier']}",
+        UNIT_SUMMARY_TABLE,
+    ]
+    fixed_prefix = "\n".join(fixed_parts)
 
-    # Layer 3: Full unit summary table
-    parts.append(UNIT_SUMMARY_TABLE)
+    # --- Dynamic suffix: Layers 4-6 ---
+    dynamic_parts: list[str] = []
 
-    # Layer 4: Current unit detail
     if unit_data:
         topics_str = ", ".join(unit_data.get("topics", []))
         grammar_str = "\n".join(
             f"  - {g}" for g in unit_data.get("grammar_focus", [])
         )
-        parts.append(
+        dynamic_parts.append(
             f"\n## 현재 학습 단원: {unit_id} — {unit_data.get('title', '')}\n\n"
             f"**Band {unit_data.get('band', '')}**: {unit_data.get('band_name', '')}\n\n"
             f"**학습 주제**: {topics_str}\n\n"
@@ -231,16 +223,24 @@ def build_system_prompt(
             f"**추가 맥락**: {unit_data.get('context_prompt', '')}"
         )
     else:
-        # EC-2: No unit selected → default note
-        parts.append(
+        dynamic_parts.append(
             f"\n## 현재 학습 단원: {unit_id}\n\n"
             "단원 정보를 찾을 수 없습니다. A1-1 기준으로 기초 독일어를 설명하세요."
         )
 
-    # Layer 5: Answer format
-    parts.append(ANSWER_FORMAT)
+    dynamic_parts.append(ANSWER_FORMAT)
+    dynamic_parts.append(_build_constraints(level))
 
-    # Layer 6: Constraints
-    parts.append(_build_constraints(level))
+    dynamic_suffix = "\n".join(dynamic_parts)
 
-    return "\n".join(parts)
+    return fixed_prefix, dynamic_suffix
+
+
+def build_system_prompt(
+    level: str,
+    unit_id: str,
+    unit_data: Optional[dict[str, Any]],
+) -> str:
+    """Convenience wrapper that returns the full prompt as a single string."""
+    fixed, dynamic = build_system_prompt_parts(level, unit_id, unit_data)
+    return f"{fixed}\n{dynamic}"

@@ -20,7 +20,7 @@ from typing import Any, AsyncGenerator
 import anthropic
 
 from app.core.config import settings
-from app.data.prompts import build_system_prompt
+from app.data.prompts import build_system_prompt_parts
 from app.data.units import DOKDOKDOK_A1
 
 logger = logging.getLogger(__name__)
@@ -65,11 +65,28 @@ class ClaudeService:
             Dict events with "type" key.
         """
         unit_data = DOKDOKDOK_A1.get(unit_id) if textbook_id == "dokdokdok-a1" else None
-        system_prompt = build_system_prompt(level=level, unit_id=unit_id, unit_data=unit_data)
+        fixed_prefix, dynamic_suffix = build_system_prompt_parts(
+            level=level, unit_id=unit_id, unit_data=unit_data
+        )
 
         if rag_chunks:
             joined = "\n\n---\n\n".join(rag_chunks)
-            system_prompt += f"\n\n## 교재 원문 참고\n\n{joined}"
+            dynamic_suffix += f"\n\n## 교재 원문 참고\n\n{joined}"
+
+        # System prompt as two blocks: cacheable prefix + dynamic suffix.
+        # The fixed_prefix (~1,300 tokens) is identical across same-level requests
+        # and qualifies for Anthropic prompt caching (min 1,024 tokens).
+        system: list[dict] = [
+            {
+                "type": "text",
+                "text": fixed_prefix,
+                "cache_control": {"type": "ephemeral"},
+            },
+            {
+                "type": "text",
+                "text": dynamic_suffix,
+            },
+        ]
 
         # Build message list for Claude (history + current user message)
         messages = _build_messages(history, user_message, page_image=page_image)
@@ -82,7 +99,7 @@ class ClaudeService:
                 await asyncio.sleep(backoff)
 
             try:
-                async for event in self._stream_once(system_prompt, messages):
+                async for event in self._stream_once(system, messages):
                     yield event
                 return  # Success — exit retry loop
             except anthropic.RateLimitError as exc:
@@ -116,7 +133,7 @@ class ClaudeService:
 
     async def _stream_once(
         self,
-        system_prompt: str,
+        system: list[dict],
         messages: list[dict[str, Any]],
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
@@ -129,7 +146,7 @@ class ClaudeService:
         async with self._client.messages.stream(
             model=settings.CLAUDE_MODEL,
             max_tokens=MAX_TOKENS,
-            system=system_prompt,
+            system=system,
             messages=messages,
         ) as stream:
             async for text in stream.text_stream:

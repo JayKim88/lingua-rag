@@ -1229,7 +1229,9 @@ export default function PdfViewer({
           className="fixed z-40 bg-white border border-gray-200 rounded-xl shadow-md overflow-hidden flex"
           style={{
             left: Math.min(hoverPopup.x - 4, window.innerWidth - 220),
-            top: hoverPopup.y - 52,
+            top: hoverPopup.y - 52 < 8
+              ? hoverPopup.y + 20
+              : hoverPopup.y - 52,
           }}
           onMouseEnter={() => {
             if (hoverHideTimer.current) clearTimeout(hoverHideTimer.current);
