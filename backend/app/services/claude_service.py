@@ -71,7 +71,10 @@ class ClaudeService:
 
         if rag_chunks:
             joined = "\n\n---\n\n".join(rag_chunks)
-            dynamic_suffix += f"\n\n## 교재 원문 참고\n\n{joined}"
+            # Prepend RAG context so it appears immediately after the cached prefix.
+            # The model attends most to the start/end of context ("Lost in the Middle",
+            # Liu et al. 2023) — placing retrieval chunks first maximises recall.
+            dynamic_suffix = f"## 교재 원문 참고\n\n{joined}\n\n" + dynamic_suffix
 
         # System prompt as two blocks: cacheable prefix + dynamic suffix.
         # The fixed_prefix (~1,300 tokens) is identical across same-level requests
