@@ -38,15 +38,32 @@
 
 ## 단기 (Medium effort / High impact)
 
-- [ ] **User Feedback UI** — v0.3 Phase 2
-  - 응답 하단 thumbs up/down UI
-  - backend: `POST /api/feedback` + `message_feedback` DB 테이블
+- [x] **User Feedback UI** — v0.3 Phase 2 — 2026-03-04
+  - 응답 하단 thumbs up/down UI (isSummary 제외, 토글 지원)
+  - backend: `PATCH /api/messages/{id}/feedback` + messages 테이블 feedback 컬럼
   - 목적: eval 결과와 사용자 체감 품질 상관관계 확인
 
-- [ ] **Monitoring 강화** (Ch. 10)
-  - `messages.token_count` 실기록 (현재 unused)
-  - 추가 지표: 대화 평균 턴 수, 응답 중단율, 단원별 RAG 히트율
-  - 변경 파일: `chat.py`, `repositories.py`
+- [x] **Monitoring 강화** (Ch. 10) — 2026-03-04
+  - `messages.token_count` 실기록 (output_tokens from Claude API usage)
+  - `messages.rag_hit` BOOLEAN 추가 — 단원별 RAG 히트율 추적 가능
+  - 로그: `Token usage — unit=%s out=%d in=%d cache_read=%d cache_write=%d`
+  - 변경 파일: `claude_service.py`, `chat.py`, `repositories.py`, `schema.sql`
+
+- [ ] **P0-1: german_bold_complete 프롬프트 개선** — Eval 이터레이션 2라운드
+  - 실패 패턴 5종 확인: 형태소(`ge-`/`-en`), 변환 표기(`ein → kein`), 언어학 용어(`Dativ`), 팁 섹션
+  - `prompts.py` ANSWER_FORMAT에 이 패턴들의 명시적 예시 추가
+  - 목표: 40% → 70%+ 달성
+  - 변경 파일: `backend/app/data/prompts.py`, `scripts/evaluate.py` 재실행
+
+- [ ] **P0-2: Eval v2 — 의미론적 규칙 추가**
+  - 현재 eval은 포맷 준수율만 측정. "좋은 튜터인가?"는 미측정
+  - 추가 규칙: `correct_level` (A1 수준 적합성), `example_relevance` (예문-문법 연관성)
+  - 변경 파일: `scripts/evaluate.py`, `scripts/test_questions.json`
+
+- [ ] **P1-1: GitHub Actions eval CI 파이프라인**
+  - 트리거: push to main (backend/ 변경 시)
+  - 5개 핵심 질문 실행 (비용 절감), 점수 < 85% 시 경고
+  - 변경 파일: `.github/workflows/eval.yml` (신규), `scripts/evaluate.py` (--questions 옵션)
 
 - [ ] **Multi-turn Query Rewriting** — v0.3 Phase 3 (RAG 재활성화 후)
   - "이 문장 다시 설명해줘" 같은 후속 질문을 독립 문장으로 재작성 후 RAG 검색
@@ -58,10 +75,13 @@
 
 ## 중기 (Strategic value)
 
-- [ ] **Evaluation Framework — RAGAS** (Ch. 3-4)
+- [ ] **P3: 피드백-Eval 상관관계 분석** (실사용자 피드백 20개+ 수집 후)
+  - SQL: 단원별 thumbs-up 비율 vs eval 점수 매핑
+  - 목적: "eval 수치가 실사용자 만족도를 예측하는가" 데이터 증명 (측정 루프 완결)
+
+- [ ] **P4: Evaluation Framework — RAGAS** (Ch. 3-4, 실사용자 50명+ 후)
   - context relevance, groundedness, answer relevance 3종
-  - 전제 조건: 골든 데이터셋 확보 (실사용자 증가 후)
-  - LLM-as-Judge Phase 1 완료 후 자연스러운 확장
+  - 전제 조건: 골든 데이터셋 확보, RAG_ENABLED=True 복원
 
 - [ ] **임베딩 모델 평가** — 독일어 RAG 품질 최적화
   - 현재: `text-embedding-3-small` (영어 위주)
@@ -78,7 +98,7 @@
 
 ---
 
-## 실사용자 확보
+## 실사용자 확보 (P2)
 
 > 포트폴리오 스토리의 전제 조건. 실사용자 없이는 eval 데이터도, 피드백도 없음.
 

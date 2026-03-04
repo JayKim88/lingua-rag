@@ -4,6 +4,42 @@
 > **Scope**: Full stack (backend + frontend + infra)
 > **Live**: https://lingua-rag.vercel.app
 
+## Session: 2026-03-04 22:08
+
+> **Context**: User Feedback UI + MessageRepository 버그 수정 + Monitoring 강화 + AI Product Engineer 역량 로드맵 + P0-1 german_bold eval 개선 (4라운드)
+
+### Done
+- fix(repositories): MessageRepository 중복 클래스 정의 제거 — 두 번째 `class MessageRepository:` 선언이 첫 번째를 덮어써 `create()`/`get_recent()`/`get_all()` 손실 (대화 내역 사라지는 버그); `update_feedback()` 병합으로 수정
+- feat(feedback): thumbs up/down UI — 응답 하단 👍/👎 토글 버튼, isSummary 제외, optimistic update
+- feat(feedback): `PATCH /api/messages/{id}/feedback` — messages 테이블 `feedback TEXT` 컬럼 추가, Supabase 마이그레이션 적용
+- feat(monitoring): `claude_service.py` — 스트림 완료 후 `usage` 이벤트 발행 (output/input/cache_read/cache_creation tokens)
+- feat(monitoring): `messages.token_count` 실기록 — Claude API `final_message.usage.output_tokens` 저장
+- feat(monitoring): `messages.rag_hit BOOLEAN` 추가 — 단원별 RAG 히트율 추적, Supabase `ALTER TABLE` 마이그레이션 적용
+- feat(monitoring): 구조화 로그 `Token usage — unit=%s out=%d in=%d cache_read=%d cache_write=%d`
+- docs: `docs/portfolio-story.md` + `docs/todo.md` — AI Product Engineer 역량 분석 + P0~P4 로드맵 반영
+- fix(prompts): P0-1 R1 — ANSWER_FORMAT에 형태소 접사(`-en`/`-t`), 변환 표기(`ein→kein`), 문법 용어(`Dativ`), 팁 섹션 예시 추가 → german_bold 40%→50%, overall 90.0% 유지
+- fix(prompts): P0-1 R2 — `ein/eine` in formulas, `haben`/`sein` in explanations, `bitte` variants, 대명사 예시 → german_bold 50%→55.6%, overall 90.0%→92.6%
+- fix(prompts): P0-1 R3 — 괄호 안 활용형, `ge-`+`mach`+`-t` 구조 설명 예시 → german_bold 55.6%→60.0%, overall 92.6%→93.3%
+- fix(prompts): P0-1 R4 — 괄호 안 활용형(`kommst`), 비교 요약(`kein Hund`), 인칭 활용(`ich habe`), 방향 어휘(`geradeaus`) 금지 예시 추가 (크레딧 부족으로 eval 미실행)
+
+### Decisions
+- **P0-1 judge hallucination 발견**: 3차 eval 결과 JSON 분석 시, 모델은 `**geradeaus**`, `**kein Hund**`, `**ich habe**` 등을 올바르게 bold 처리했음에도 judge가 "bold 없음"으로 판정하는 케이스 확인. 실제 모델 오류가 아닌 judge 평가 오류 → P0-2에서 judge 프롬프트 개선으로 해결
+- **Monitoring 구조**: `claude_service.py`에서 `usage` 이벤트 발행 → `chat.py`에서 캡처 → `msg_repo.create(token_count, rag_hit)` 저장. `rag_hit = bool(rag_chunks)`로 계산
+- **피드백 인프라 완성**: 👍/👎 UI + PATCH API + DB 저장 + token_count + rag_hit — "eval 수치 vs 사용자 만족도" 상관관계 분석을 위한 인프라 구축 완료 (데이터 수집 대기 중)
+
+### Issues
+- **API credit balance 부족**: P0-1 4차 eval 실행 시 "credit balance too low" 오류 → 크레딧 충전 후 재실행 필요
+
+### Next
+- [ ] API 크레딧 충전 후 P0-1 4차 eval 재실행 — 목표 70%+
+- [ ] P0-2: Eval 의미론적 규칙 추가 (`correct_level`, `example_relevance`) + judge 프롬프트 개선 (hallucination 방지)
+- [ ] P1-1: GitHub Actions eval CI 파이프라인 (`.github/workflows/eval.yml`, push to main 트리거, 5개 질문, <85% 경고)
+- [ ] P2: 실사용자 확보 — 채널 선정 + 베타 게시물 작성
+- [ ] Hover popup edge positioning — viewport top 오버플로우 시 아래 표시 fallback
+- [ ] Run notes table migration in Supabase SQL editor (production)
+
+---
+
 ## Session: 2026-03-03 14:51
 
 > **Context**: PDF hover/selection popup UX improvements (button labels, order, click timing, hover suppression logic) + chat send cancel feature
@@ -70,7 +106,7 @@
 - **Judge self-contradiction**: reason이 PASS 설명인데 `pass: false` 반환 (q04, q10). "pass 값과 reason 일치" 지시 추가로 부분 완화
 
 ### Next
-- [ ] User Feedback UI — 응답 하단 👍/👎 버튼 + `message_feedback` DB 테이블 (v0.3 Phase 2)
+- [x] User Feedback UI — 응답 하단 👍/👎 버튼 + `message_feedback` DB 테이블 (v0.3 Phase 2)
 - [ ] 실사용자 확보 — 채널 선정 (Reddit r/German, Discord, Naver 카페)
 - [ ] Hover popup edge positioning — viewport top 오버플로우 시 아래 표시 fallback
 - [ ] Run notes table migration in Supabase SQL editor (production)

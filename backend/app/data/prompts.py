@@ -111,16 +111,36 @@ ANSWER_FORMAT = """
 ## 답변 형식 (반드시 준수)
 
 **[독일어 bold 규칙]** 응답 어디에서든 독일어 단어·표현·문장이 나오면 위치에 관계없이 `**...**`로 감싸세요.
-위치 예외 없음: 본문, 괄호, 마크다운 제목(##), 설명문, 어휘 목록, 비교 정리 모두 동일 적용.
+위치 예외 없음: 본문, 괄호, 마크다운 제목(##), 설명문, 어휘 목록, 비교 정리, 💡 팁 섹션 모두 동일 적용.
 - 올바름: **A**, **Guten Tag!**, **Ich komme aus Korea.**
 - 올바름: 남성 명사(**der**)는 **einen**으로 바뀝니다.
 - 올바름: **bitte**를 붙이면 공손해집니다.
 - 올바름: ## **kein** / **keine** — 명사 부정  ← 헤딩 안 독일어도 bold
 - 올바름: **Deutschland**, **Korea**, **Japan**  ← 국가명도 bold
 - 올바름: **ge-** + 어간 + **-t**  ← 문법 접사도 bold
+- 올바름: 어미 **-en**, **-t**, **-st** ← 단독 접사도 bold
+- 올바름: **ein** → **kein** / **eine** → **keine** ← 변환 표기의 양쪽 모두 bold
+- 올바름: **ein/eine** + 명사 → **kein/keine** + 명사 ← 구조 공식도 bold
+- 올바름: **zu** + **dem** → **zum** ← 결합 표기도 bold
+- 올바름: **Dativ**, **Akkusativ**, **Nominativ** ← 문법 용어도 bold
+- 올바름: **haben** 대신 **sein**을 씁니다. ← 설명문 속 동사도 bold
+- 올바름: **bitte**를 붙이면 / **bitte**를 붙여요 / **bitte**와 함께 ← 어떤 형태든 bold
+- 올바름: **ich**와 **er**/**sie**/**es**가 같은 형태입니다. ← 대명사도 bold
+- 올바름: **ein/eine** + 명사가 있는 자리에 **kein/keine**를 씁니다. ← ein/eine도 bold
+- 올바름: **ge-** + 어간(**mach**) + **-t** = **gemacht** ← 구조 설명 전체 bold
+- 올바름: 💡 팁: **sein**과 **haben**의 차이를 꼭 기억하세요. ← 팁 안도 bold
+- 올바름: **du** 형 현재형(**kommst**)에서 어미 **-st**를 빼세요 ← 괄호 안 활용형·접사도 bold
+- 올바름: **kein Hund** → 개가 없다 / **nicht schlafen** → 자지 않다 ← 비교 요약 섹션도 bold
+- 올바름: **ich habe** → 나는 ~했다, **du hast** → 너는 ~했다 ← 인칭별 활용 목록도 bold
+- 올바름: **geradeaus** → 직진, **links** → 왼쪽, **rechts** → 오른쪽 ← 방향 어휘 목록도 bold
 - 금지: **Ich komme** aus Korea. ← 문장 도중 bold를 끊으면 안 됨
 - 금지: 남성 명사(der)는 einen으로 바뀝니다. ← 독일어에 bold 없음
 - 금지: ## gehen — 이동 동사  ← 헤딩 속 독일어에 bold 없음
+- 금지: 💡 팁: sein과 haben의 차이 ← 팁 안 독일어에 bold 없음
+- 금지: ein/eine + 명사 → kein/keine + 명사 ← 구조 공식 안 독일어도 bold 필수
+- 금지: du 형 현재형(kommst)에서 ← 괄호 안도 bold 필수
+- 금지: kein Hund → 개가 없다 ← 비교 요약도 bold 필수
+- 금지: ich habe → 나는 ~했다 ← 인칭 활용도 bold 필수
 
 **[표 금지]** 어휘·예문 목록에 markdown 표(`|` 기호)를 절대 사용하지 마세요.
 어휘 목록은 반드시 bold 리스트로 제시하세요:
