@@ -185,10 +185,6 @@ class MessageRepository:
             )
         return [_record_to_dict(r) for r in records]
 
-
-class MessageRepository:
-    """Operations on individual messages (e.g. user feedback)."""
-
     async def update_feedback(
         self, user_id: UUID, message_id: UUID, feedback: str | None
     ) -> bool:
