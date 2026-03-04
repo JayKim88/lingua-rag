@@ -120,6 +120,7 @@ async def chat_endpoint(
         full_response = ""
         was_truncated = False
         assistant_msg_id = None
+        output_tokens: int | None = None
 
         async with user_lock:
             # 3. Fetch history INSIDE lock — prevents race with concurrent tab
@@ -167,6 +168,16 @@ async def chat_endpoint(
                     if event["type"] == "token":
                         full_response += event["content"]
                         yield _sse(event)
+                    elif event["type"] == "usage":
+                        output_tokens = event["output_tokens"]
+                        logger.info(
+                            "Token usage — unit=%s out=%d in=%d cache_read=%d cache_write=%d",
+                            unit_id,
+                            event["output_tokens"],
+                            event["input_tokens"],
+                            event["cache_read_tokens"],
+                            event["cache_creation_tokens"],
+                        )
                     elif event["type"] == "truncated":
                         was_truncated = True
                         yield _sse(event)
@@ -181,6 +192,8 @@ async def chat_endpoint(
                         conversation_id=conversation_id,
                         role="assistant",
                         content=full_response,
+                        token_count=output_tokens,
+                        rag_hit=bool(rag_chunks),
                     )
                     assistant_msg_id = str(saved["id"])
 

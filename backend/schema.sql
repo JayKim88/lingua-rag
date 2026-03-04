@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS messages (
     role            VARCHAR(10) NOT NULL CHECK (role IN ('user', 'assistant')),
     content         TEXT NOT NULL,
     token_count     INTEGER,
+    rag_hit         BOOLEAN DEFAULT NULL,
     feedback        VARCHAR(4) CHECK (feedback IN ('up', 'down')) DEFAULT NULL,
     created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );

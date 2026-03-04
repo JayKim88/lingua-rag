@@ -124,6 +124,7 @@ class MessageRepository:
         role: str,
         content: str,
         token_count: Optional[int] = None,
+        rag_hit: Optional[bool] = None,
     ) -> dict[str, Any]:
         """Insert a new message and return the record."""
         pool = get_pool()
@@ -131,15 +132,16 @@ class MessageRepository:
             record = await conn.fetchrow(
                 """
                 INSERT INTO messages
-                    (id, conversation_id, role, content, token_count, created_at)
+                    (id, conversation_id, role, content, token_count, rag_hit, created_at)
                 VALUES
-                    (gen_random_uuid(), $1, $2, $3, $4, NOW())
+                    (gen_random_uuid(), $1, $2, $3, $4, $5, NOW())
                 RETURNING *
                 """,
                 conversation_id,
                 role,
                 content,
                 token_count,
+                rag_hit,
             )
         return _record_to_dict(record)
 

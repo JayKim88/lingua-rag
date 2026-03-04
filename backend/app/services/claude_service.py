@@ -157,6 +157,14 @@ class ClaudeService:
 
             final_message = await stream.get_final_message()
             stop_reason = final_message.stop_reason
+            usage = final_message.usage
+            yield {
+                "type": "usage",
+                "output_tokens": usage.output_tokens,
+                "input_tokens": usage.input_tokens,
+                "cache_read_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
+                "cache_creation_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
+            }
 
         if stop_reason == "max_tokens":
             logger.info("Response truncated: max_tokens reached.")
