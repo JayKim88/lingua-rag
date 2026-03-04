@@ -15,6 +15,7 @@ import {
   formatSavedAt,
 } from "@/lib/summaries";
 import { getNotes, saveNote, deleteNote } from "@/lib/notes";
+import { patchFeedback } from "@/lib/feedback";
 
 interface ChatPanelProps {
   unitId: string;
@@ -33,7 +34,7 @@ export default function ChatPanel({
   pageImage,
   speak,
 }: ChatPanelProps) {
-  const { messages, isStreaming, isLoadingHistory, queueSize, sendMessage, sendSummary, cancelMessage } =
+  const { messages, isStreaming, isLoadingHistory, queueSize, sendMessage, sendSummary, cancelMessage, updateFeedback } =
     useChat({ unitId, level, textbookId, pageImage });
 
   const unitTitle = UNITS.find((u) => u.id === unitId)?.title ?? unitId;
@@ -232,6 +233,10 @@ export default function ChatPanel({
               speak={speak}
               onInject={(text) => setLocalInject({ text, id: Date.now() })}
               onSaveSummary={handleSaveSummary}
+              onFeedback={async (messageId, feedback) => {
+                updateFeedback(messageId, feedback);
+                await patchFeedback(messageId, feedback);
+              }}
             />
           )}
           <div ref={bottomRef} />

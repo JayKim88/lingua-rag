@@ -61,11 +61,13 @@ export function useChat({ unitId, level, textbookId, pageImage }: UseChatOptions
         if (!cancelled && dbMessages?.length) {
           setMessages(
             dbMessages.map(
-              (m: { id: string; role: "user" | "assistant"; content: string; created_at?: string }) => ({
+              (m: { id: string; role: "user" | "assistant"; content: string; feedback?: "up" | "down" | null; created_at?: string }) => ({
                 id: m.id,
+                backendId: m.id, // DB messages already have the backend UUID as id
                 role: m.role,
                 content: m.content,
                 isStreaming: false,
+                feedback: m.feedback ?? null,
                 createdAt: m.created_at,
               })
             )
@@ -180,6 +182,14 @@ export function useChat({ unitId, level, textbookId, pageImage }: UseChatOptions
                     m.id === assistantMsgId ? { ...m, isTruncated: true } : m
                   )
                 );
+              } else if (parsed.type === "done" && parsed.message_id) {
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === assistantMsgId
+                      ? { ...m, backendId: parsed.message_id }
+                      : m
+                  )
+                );
               } else if (parsed.type === "error") {
                 setMessages((prev) =>
                   prev.map((m) =>
@@ -288,5 +298,18 @@ export function useChat({ unitId, level, textbookId, pageImage }: UseChatOptions
     abortControllerRef.current?.abort();
   }, []);
 
-  return { messages, isStreaming, isLoadingHistory, queueSize, sendMessage, sendSummary, cancelMessage };
+  const updateFeedback = useCallback(
+    (messageId: string, feedback: "up" | "down" | null) => {
+      setMessages((prev) =>
+        prev.map((m) =>
+          (m.backendId === messageId || m.id === messageId)
+            ? { ...m, feedback }
+            : m
+        )
+      );
+    },
+    []
+  );
+
+  return { messages, isStreaming, isLoadingHistory, queueSize, sendMessage, sendSummary, cancelMessage, updateFeedback };
 }

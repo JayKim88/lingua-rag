@@ -314,6 +314,53 @@ function SaveSummaryButton({ content, onSave }: { content: string; onSave?: (c: 
 }
 
 // ---------------------------------------------------------------------------
+// FeedbackButtons — thumbs up/down shown below assistant messages
+// ---------------------------------------------------------------------------
+function FeedbackButtons({
+  messageId,
+  feedback,
+  onFeedback,
+}: {
+  messageId: string;
+  feedback?: "up" | "down" | null;
+  onFeedback: (id: string, f: "up" | "down" | null) => void;
+}) {
+  const toggle = (val: "up" | "down") =>
+    onFeedback(messageId, feedback === val ? null : val);
+
+  return (
+    <div className="flex items-center gap-1 mt-1.5">
+      <button
+        onClick={() => toggle("up")}
+        title="도움이 됐어요"
+        className={`p-1 rounded transition-colors ${
+          feedback === "up"
+            ? "text-blue-600"
+            : "text-gray-300 hover:text-blue-400"
+        }`}
+      >
+        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill={feedback === "up" ? "currentColor" : "none"} stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5" />
+        </svg>
+      </button>
+      <button
+        onClick={() => toggle("down")}
+        title="도움이 안 됐어요"
+        className={`p-1 rounded transition-colors ${
+          feedback === "down"
+            ? "text-red-500"
+            : "text-gray-300 hover:text-red-400"
+        }`}
+      >
+        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill={feedback === "down" ? "currentColor" : "none"} stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M10 14H5.236a2 2 0 01-1.789-2.894l3.5-7A2 2 0 018.736 3h4.018a2 2 0 01.485.06l3.76.94m-7 10v5a2 2 0 002 2h.096c.5 0 .905-.405.905-.904 0-.715.211-1.413.608-2.008L17 13V4m-7 10h2m5-10h2a2 2 0 012 2v6a2 2 0 01-2 2h-2.5" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // MessageList
 // ---------------------------------------------------------------------------
 interface MessageListProps {
@@ -321,9 +368,10 @@ interface MessageListProps {
   speak: (text: string) => void;
   onInject: (text: string) => void;
   onSaveSummary?: (content: string) => void;
+  onFeedback?: (messageId: string, feedback: "up" | "down" | null) => void;
 }
 
-export default function MessageList({ messages, speak, onInject, onSaveSummary }: MessageListProps) {
+export default function MessageList({ messages, speak, onInject, onSaveSummary, onFeedback }: MessageListProps) {
   let lastDateKey = "";
 
   return (
@@ -360,7 +408,7 @@ export default function MessageList({ messages, speak, onInject, onSaveSummary }
                   )}
                 </div>
               ) : (
-                <div className="flex justify-start">
+                <div className="flex flex-col items-start">
                   <div className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed rounded-bl-sm shadow-sm ${
                     msg.isSummary
                       ? "bg-blue-50 border border-blue-200 text-gray-800"
@@ -383,6 +431,13 @@ export default function MessageList({ messages, speak, onInject, onSaveSummary }
                       <SaveSummaryButton content={msg.content} onSave={onSaveSummary} />
                     )}
                   </div>
+                  {!msg.isStreaming && !msg.isSummary && msg.backendId && onFeedback && (
+                    <FeedbackButtons
+                      messageId={msg.backendId}
+                      feedback={msg.feedback}
+                      onFeedback={onFeedback}
+                    />
+                  )}
                 </div>
               )}
             </div>

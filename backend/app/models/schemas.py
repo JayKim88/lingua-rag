@@ -127,3 +127,9 @@ class NoteListResponse(BaseModel):
     """Response for GET /api/notes."""
 
     notes: list[NoteOut]
+
+
+class FeedbackUpdate(BaseModel):
+    """Request body for PATCH /api/messages/{id}/feedback."""
+
+    feedback: Optional[Literal["up", "down"]] = None  # None removes feedback

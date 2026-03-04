@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.db.connection import close_db_pool, get_pool, init_db_pool
-from app.routers import chat, conversations, health, notes, summaries
+from app.routers import chat, conversations, health, messages, notes, summaries
 
 logging.basicConfig(
     level=logging.INFO,
@@ -88,7 +88,7 @@ app.add_middleware(
         r"https://[a-zA-Z0-9-]+\.vercel\.app" if _has_vercel_wildcard else None
     ),
     allow_credentials=True,  # Required for httponly session cookies
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Accept", "Authorization"],
     expose_headers=[],
 )
@@ -101,3 +101,4 @@ app.include_router(chat.router, prefix="/api", tags=["Chat"])
 app.include_router(conversations.router, prefix="/api", tags=["Conversations"])
 app.include_router(summaries.router, prefix="/api", tags=["Summaries"])
 app.include_router(notes.router, prefix="/api", tags=["Notes"])
+app.include_router(messages.router, prefix="/api", tags=["Messages"])

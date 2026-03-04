@@ -186,6 +186,36 @@ class MessageRepository:
         return [_record_to_dict(r) for r in records]
 
 
+class MessageRepository:
+    """Operations on individual messages (e.g. user feedback)."""
+
+    async def update_feedback(
+        self, user_id: UUID, message_id: UUID, feedback: str | None
+    ) -> bool:
+        """Set or clear feedback ('up'/'down'/None) on an assistant message.
+
+        Verifies ownership via the parent conversation's user_id.
+        Returns True if the row was found and updated, False otherwise.
+        """
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE messages m
+                SET feedback = $1
+                FROM conversations c
+                WHERE m.id = $2
+                  AND m.conversation_id = c.id
+                  AND c.user_id = $3
+                RETURNING m.id
+                """,
+                feedback,
+                message_id,
+                user_id,
+            )
+        return row is not None
+
+
 class SummaryRepository:
     """CRUD operations for summaries table."""
 
