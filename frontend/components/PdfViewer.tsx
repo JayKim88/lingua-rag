@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import PronunciationModal from "./PronunciationModal";
 import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/TextLayer.css";
 import "react-pdf/dist/Page/AnnotationLayer.css";
@@ -211,6 +212,7 @@ export default function PdfViewer({
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [popup, setPopup] = useState<SelectionPopup | null>(null);
   const [hoverPopup, setHoverPopup] = useState<HoverPopup | null>(null);
+  const [practicePdfText, setPracticePdfText] = useState<string | null>(null);
   const [isRestoring, setIsRestoring] = useState(true);
   const [library, setLibrary] = useState<PdfMeta[]>([]);
   const [pageInputStr, setPageInputStr] = useState<string | null>(null);
@@ -1306,6 +1308,31 @@ export default function PdfViewer({
             </svg>
             질문하기
           </button>
+          <div className="w-px bg-gray-200" />
+          <button
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
+              setPracticePdfText(hoverPopup.text);
+              setHoverPopup(null);
+            }}
+            className="px-3 py-2 text-xs font-medium text-purple-700 hover:bg-purple-50 active:bg-purple-200 active:scale-95 transition-all flex items-center gap-1.5"
+            title="발음 연습"
+          >
+            <svg
+              className="w-3.5 h-3.5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"
+              />
+            </svg>
+            연습
+          </button>
         </div>
       )}
 
@@ -1365,6 +1392,16 @@ export default function PdfViewer({
             질문하기
           </button>
         </div>
+      )}
+
+      {/* Pronunciation practice modal */}
+      {practicePdfText && (
+        <PronunciationModal
+          key={practicePdfText}
+          text={practicePdfText}
+          speak={speak}
+          onClose={() => setPracticePdfText(null)}
+        />
       )}
     </div>
   );

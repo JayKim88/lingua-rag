@@ -5,6 +5,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
 import MessageList, { ChatActionsCtx, MARKDOWN_COMPONENTS } from "./MessageList";
+import PronunciationModal from "./PronunciationModal";
 import InputBar from "./InputBar";
 import { useChat } from "@/hooks/useChat";
 import { UNITS, SavedSummary, SavedNote } from "@/lib/types";
@@ -121,6 +122,11 @@ export default function ChatPanel({
   const [activeTab, setActiveTab] = useState<"summary" | "memo">("summary");
 
   // ---------------------------------------------------------------------------
+  // Pronunciation practice modal
+  // ---------------------------------------------------------------------------
+  const [practiceText, setPracticeText] = useState<string | null>(null);
+
+  // ---------------------------------------------------------------------------
   // Memo creation modal
   // ---------------------------------------------------------------------------
   const [showMemoModal, setShowMemoModal] = useState(false);
@@ -232,6 +238,7 @@ export default function ChatPanel({
               messages={messages}
               speak={speak}
               onInject={(text) => setLocalInject({ text, id: Date.now() })}
+              onPractice={(text) => setPracticeText(text)}
               onSaveSummary={handleSaveSummary}
               onFeedback={async (messageId, feedback) => {
                 updateFeedback(messageId, feedback);
@@ -325,6 +332,7 @@ export default function ChatPanel({
                   value={{
                     speak,
                     onInject: (text) => setLocalInject({ text, id: Date.now() }),
+                    onPractice: (text) => setPracticeText(text),
                   }}
                 >
                   <div className="prose prose-sm max-w-none prose-headings:text-gray-800 prose-strong:text-gray-900 text-gray-800">
@@ -517,6 +525,16 @@ export default function ChatPanel({
         onMemo={handleOpenMemo}
         showSummary={showNotes}
       />
+
+      {/* Pronunciation practice modal */}
+      {practiceText && (
+        <PronunciationModal
+          key={practiceText}
+          text={practiceText}
+          speak={speak}
+          onClose={() => setPracticeText(null)}
+        />
+      )}
     </div>
   );
 }

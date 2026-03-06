@@ -4,6 +4,34 @@
 > **Scope**: Full stack (backend + frontend + infra)
 > **Live**: https://lingua-rag.vercel.app
 
+## Session: 2026-03-06 23:28
+
+> **Context**: PronunciationModal 전체 로직 버그 수정 — 마이크 지속, 더블 카운팅, 고유명사 인식 실패
+
+### Done
+- fix(modal): 2번째 연습부터 마이크 미동작 버그 수정 — 성공 감지 후 `stop()` 직후 final `onresult`가 재발화되어 타이머 2개 생성, 두 SpeechRecognition 인스턴스가 동시에 마이크 경쟁 → `if (phaseRef.current !== "listening") return` 가드 추가로 해결
+- fix(modal): 모달 종료 후 마이크 유지 버그 — cleanup에서 `recRef.current = null` 설정 후 `abort()` 호출, 모든 `onend`/`onerror` 핸들러에 `rec !== recRef.current` stale instance 가드 추가
+- fix(modal): `handleSpeak` TTS 재생 후 마이크 재시작 문제 — `abort()` 전에 `phaseRef.current = "done"` 설정하여 `onend`의 자동 재시작 차단; `mountedRef`로 언마운트 후 `waitAndRestart` 실행 방지
+- fix(modal): TTS 재생 중 마이크가 TTS 소리를 인식하는 버그 — 동일한 `phaseRef` 선설정으로 해결
+- fix(modal): wrongWord 오답 처리 개선 — `phaseRef.current = "done"` 먼저 설정 후 `stop()` 호출하여 `onend` 중복 재시작 경로 제거
+- fix(modal): 고유명사(Pascal 등) 미매칭 — fuzzyMatch 임계값 완화 (`maxLen <= 3 → 1`, `<= 6 → 2`, `> 6 → 3`); 마지막 단어 wrongWord 리셋 제거 (STT가 고유명사 잘못 인식해도 전체 리셋 없이 재시도)
+- refactor(modal): `fullResetRef` 제거, `onerror` 중복 재시작 경로 제거, `onend` 단일 재시작 경로로 통일
+
+### Decisions
+- **`continuous: false` 유지**: `continuous: true` 전환 시 성공 판정 로직 오동작 확인 → revert. 현재 구조에서는 `false`가 안정적
+- **stale instance 패턴**: `recRef.current = null` (cleanup) + `rec !== recRef.current` (이벤트 핸들러 가드) 조합으로 SpeechRecognition lifecycle 관리
+- **마지막 단어 관대 처리**: 고유명사/이름이 포함된 문장에서 마지막 단어 wrongWord 리셋을 제거하고 세션 자연 종료 후 재시도로 UX 개선
+
+### Issues
+- **STT 실시간 표시 지연**: `continuous: false`에서 단어별 interim result 빈도가 낮아 다음 단어가 나와야 텍스트 표시됨. `continuous: true`로 해결 가능하나 성공 판정 로직과 충돌 → 미해결
+
+### Next
+- [ ] `continuous: true` 환경에서 성공 판정 로직 재검토 — 실시간 표시 개선과 양립 가능한지 분석
+- [ ] 고유명사 매칭 추가 개선 — 원문 텍스트에서 대문자 단어를 감지해 해당 단어만 threshold 높이기
+- [ ] 발음 연습 완료 후 통계 저장 (몇 번 시도 만에 10회 성공 등)
+
+---
+
 ## Session: 2026-03-04 22:08
 
 > **Context**: User Feedback UI + MessageRepository 버그 수정 + Monitoring 강화 + AI Product Engineer 역량 로드맵 + P0-1 german_bold eval 개선 (4라운드)

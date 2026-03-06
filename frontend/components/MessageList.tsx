@@ -13,6 +13,7 @@ import type { Components } from "react-markdown";
 export const ChatActionsCtx = createContext<{
   speak: (text: string) => void;
   onInject: (text: string) => void;
+  onPractice: (text: string) => void;
 } | null>(null);
 
 // ---------------------------------------------------------------------------
@@ -175,6 +176,17 @@ function LineWithActions({ children }: { children: React.ReactNode }) {
             <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M11 19H6a2 2 0 01-2-2V7a2 2 0 012-2h11a2 2 0 012 2v6" />
               <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l3 3m0 0l3-3m-3 3v-6" />
+            </svg>
+          </button>
+
+          {/* Pronunciation practice */}
+          <button
+            onClick={() => ctx?.onPractice(getText())}
+            title="발음 연습"
+            className="p-0.5 rounded text-gray-400 hover:text-purple-600 transition-colors"
+          >
+            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
             </svg>
           </button>
         </span>
@@ -367,15 +379,16 @@ interface MessageListProps {
   messages: Message[];
   speak: (text: string) => void;
   onInject: (text: string) => void;
+  onPractice: (text: string) => void;
   onSaveSummary?: (content: string) => void;
   onFeedback?: (messageId: string, feedback: "up" | "down" | null) => void;
 }
 
-export default function MessageList({ messages, speak, onInject, onSaveSummary, onFeedback }: MessageListProps) {
+export default function MessageList({ messages, speak, onInject, onPractice, onSaveSummary, onFeedback }: MessageListProps) {
   let lastDateKey = "";
 
   return (
-    <ChatActionsCtx.Provider value={{ speak, onInject }}>
+    <ChatActionsCtx.Provider value={{ speak, onInject, onPractice }}>
       <div className="space-y-4">
         {messages.map((msg) => {
           let separator: React.ReactNode = null;
