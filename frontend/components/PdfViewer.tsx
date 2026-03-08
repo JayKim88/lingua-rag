@@ -20,6 +20,50 @@ export type { PdfMeta };
 
 pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
+const GERMAN_ABBREVS = [
+  "z.B",
+  "bzw",
+  "d.h",
+  "ca",
+  "Nr",
+  "Dr",
+  "Prof",
+  "Str",
+  "Hr",
+  "Fr",
+  "evtl",
+  "ggf",
+  "usw",
+  "etc",
+  "inkl",
+  "exkl",
+  "max",
+  "min",
+  "tel",
+  "vgl",
+  "sog",
+  "u.a",
+  "o.ä",
+  "s.o",
+  "s.u",
+  "i.d.R",
+  "m.E",
+  "Mio",
+  "Mrd",
+  "Abs",
+  "Art",
+  "Bd",
+  "Jh",
+  "hl",
+  "St",
+];
+
+const DOCUMENT_OPTIONS = {
+  standardFontDataUrl: `https://unpkg.com/pdfjs-dist@${pdfjs.version}/standard_fonts/`,
+  cMapUrl: `https://unpkg.com/pdfjs-dist@${pdfjs.version}/cmaps/`,
+  cMapPacked: true,
+};
+
 function formatFileSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -31,7 +75,10 @@ function formatLastOpened(iso: string): string {
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}분 전`;
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}시간 전`;
   if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)}일 전`;
-  return new Date(iso).toLocaleDateString("ko-KR", { month: "short", day: "numeric" });
+  return new Date(iso).toLocaleDateString("ko-KR", {
+    month: "short",
+    day: "numeric",
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -195,8 +242,8 @@ interface PdfViewerProps {
   onTextSelect: (payload: { text: string; id: number }) => void;
   onPageImageChange: (base64: string | null) => void;
   speak: (text: string) => void;
-  openFile?: File | null;   // external file to open (set by parent modal)
-  onClose?: () => void;     // called when the viewer's close button is clicked
+  openFile?: File | null; // external file to open (set by parent modal)
+  onClose?: () => void; // called when the viewer's close button is clicked
 }
 
 export default function PdfViewer({
@@ -222,7 +269,9 @@ export default function PdfViewer({
   const [tocIsGenerated, setTocIsGenerated] = useState(false); // true = auto-generated (no built-in outline)
   const [showToc, setShowToc] = useState(false);
   const tocLeaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const searchLeaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchLeaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
 
   // Search state
   const [showSearch, setShowSearch] = useState(false);
@@ -230,6 +279,9 @@ export default function PdfViewer({
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  const pageNumberRef = useRef(pageNumber);
+  pageNumberRef.current = pageNumber;
 
   const containerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -243,6 +295,29 @@ export default function PdfViewer({
   const hoverBlockOriginRef = useRef<{ x: number; y: number } | null>(null);
   const HOVER_BLOCK_DIST = 50;
 
+  // Sentence hover highlight using PDF-native coordinates from getTextContent().
+  // The text layer spans are misaligned with the canvas due to font metric
+  // approximation in PDF.js. Instead, we use the exact PDF coordinates
+  // (same data the canvas uses) and convert them via getViewport() for
+  // pixel-perfect overlays that match the canvas rendering.
+  const [highlightRects, setHighlightRects] = useState<
+    { left: number; top: number; width: number; height: number }[]
+  >([]);
+  // Separate state for drag/dblclick selection highlights (persists until focus-out)
+  const [selectionRects, setSelectionRects] = useState<
+    { left: number; top: number; width: number; height: number }[]
+  >([]);
+  const isDragging = useRef(false);
+  // Cache: textContent items + viewport for the current page
+  const textContentCache = useRef<{
+    page: number;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    items: any[];
+    viewport: { scale: number; width: number; height: number };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    rawViewport: any;
+  } | null>(null);
+
   // Open file passed from parent (modal selection)
   useEffect(() => {
     if (openFile) handleFileChange(openFile);
@@ -252,7 +327,10 @@ export default function PdfViewer({
   useEffect(() => {
     setLibrary(getLibraryMeta());
     const currentName = localStorage.getItem(LIBRARY_CURRENT_KEY);
-    if (!currentName) { setIsRestoring(false); return; }
+    if (!currentName) {
+      setIsRestoring(false);
+      return;
+    }
     loadPdfFromLibrary(currentName).then((saved) => {
       if (saved) setFile(saved);
       setIsRestoring(false);
@@ -367,87 +445,643 @@ export default function PdfViewer({
     }
   }, [popup]);
 
-  // Extract the sentence containing the hovered span from the PDF text layer.
-  // Walks neighboring spans in reading order, using Korean/CJK chars, pure
-  // symbol/number spans, and sentence-ending punctuation as natural boundaries.
-  const extractSentenceText = useCallback((targetEl: Element): string => {
-    const textLayer = containerRef.current?.querySelector(
-      ".react-pdf__Page__textContent",
-    );
-    if (!textLayer) return (targetEl.textContent ?? "").trim();
+  // Helper: clear highlight
+  const clearHighlight = useCallback(() => {
+    setHighlightRects([]);
+  }, []);
 
-    const rawText = (targetEl.textContent ?? "").trim();
+  // Load/cache textContent items for the current page.
+  // Uses pageNumberRef to always read the current page (avoids stale closures).
+  const ensureTextContent = useCallback(async () => {
+    const currentPage = pageNumberRef.current;
+    if (!pdfDocRef.current) return null;
+    if (textContentCache.current?.page === currentPage)
+      return textContentCache.current;
+    try {
+      const page = await pdfDocRef.current.getPage(currentPage);
+      const containerW = containerRef.current?.clientWidth ?? 600;
+      const desiredWidth = Math.min(containerW - 32, 760);
+      const defaultVp = page.getViewport({ scale: 1 });
+      const scale = desiredWidth / defaultVp.width;
+      const viewport = page.getViewport({ scale });
+      const content = await page.getTextContent();
+      textContentCache.current = {
+        page: currentPage,
+        items: content.items ?? [],
+        viewport: { scale, width: viewport.width, height: viewport.height },
+        rawViewport: viewport,
+      };
+      return textContentCache.current;
+    } catch {
+      return null;
+    }
+  }, []);
 
-    const isKoreanOrCJK = (t: string) =>
-      /[\u1100-\uD7FF\u4E00-\u9FFF\u3040-\u30FF]/.test(t);
-    const hasAlpha = (t: string) =>
-      /[a-zA-ZÀ-ÖØ-öø-ÿ\u1100-\uD7FF]/.test(t);
-    const endsPunct = (t: string) => /[.!?]\s*$/.test(t);
-    const isPureNonAlpha = (t: string) => !hasAlpha(t); // numbers, bullets…
+  // Compute canvas-accurate rects for a text selection range
+  const computeRangeRects = useCallback(
+    async (
+      range: Range,
+      textLayerEl: Element,
+    ): Promise<
+      { left: number; top: number; width: number; height: number }[]
+    > => {
+      const cache = await ensureTextContent();
+      if (!cache) return [];
+      const { items, rawViewport: rv } = cache;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const tItems = items.filter(
+        (it: any) => typeof it.str === "string" && it.str.trim(),
+      );
+      const pgEl = containerRef.current?.querySelector(".react-pdf__Page");
+      const pgTop = pgEl?.getBoundingClientRect().top ?? 0;
+      const usedIdx = new Set<number>();
+      const stripSym = (s: string) => s.replace(/^[^a-zA-ZÀ-ÖØ-öø-ÿ]+/, "");
+      const selSpans = Array.from(textLayerEl.querySelectorAll("span")).filter(
+        (s) => {
+          const r = s.getBoundingClientRect();
+          return (r.width > 0 || r.height > 0) && range.intersectsNode(s);
+        },
+      );
+      const rects: {
+        left: number;
+        top: number;
+        width: number;
+        height: number;
+      }[] = [];
+      for (const sp of selSpans) {
+        const spText = (sp.textContent ?? "").trim();
+        if (!spText) continue;
+        const spRelY = sp.getBoundingClientRect().top - pgTop;
+        let bIdx = -1,
+          bDist = Infinity;
+        for (let j = 0; j < tItems.length; j++) {
+          if (usedIdx.has(j)) continue;
+          const is2 = tItems[j].str.trim();
+          if (is2 !== spText && stripSym(is2) !== stripSym(spText)) continue;
+          const tr = tItems[j].transform as number[];
+          const [, py] = rv.convertToViewportPoint(tr[4], tr[5]);
+          if (Math.abs(py - spRelY) < bDist) {
+            bDist = Math.abs(py - spRelY);
+            bIdx = j;
+          }
+        }
+        if (bIdx === -1) continue;
+        usedIdx.add(bIdx);
+        const itm = tItems[bIdx];
+        const tr = itm.transform as number[];
+        const fs = Math.abs(tr[3]);
+        const px = tr[4],
+          py = tr[5],
+          pw = itm.width as number;
+        let sf = 0,
+          ef = 1;
+        const isStart =
+          sp === range.startContainer.parentElement ||
+          sp.contains(range.startContainer);
+        const isEnd =
+          sp === range.endContainer.parentElement ||
+          sp.contains(range.endContainer);
+        if (isStart || isEnd) {
+          const ctx = document.createElement("canvas").getContext("2d");
+          if (ctx) {
+            ctx.font = window.getComputedStyle(sp).font;
+            const fw = ctx.measureText(itm.str as string).width;
+            if (fw > 0) {
+              if (isStart)
+                sf =
+                  ctx.measureText(
+                    (itm.str as string).slice(0, range.startOffset),
+                  ).width / fw;
+              if (isEnd)
+                ef =
+                  ctx.measureText((itm.str as string).slice(0, range.endOffset))
+                    .width / fw;
+            }
+          }
+        }
+        const wpx = px + sf * pw,
+          wpw = (ef - sf) * pw;
+        const [x1, y1] = rv.convertToViewportPoint(wpx, py);
+        const [x2, y2] = rv.convertToViewportPoint(wpx + wpw, py + fs);
+        rects.push({
+          left: Math.min(x1, x2),
+          top: Math.min(y1, y2),
+          width: Math.abs(x2 - x1),
+          height: Math.abs(y2 - y1),
+        });
+      }
+      return rects;
+    },
+    [ensureTextContent],
+  );
 
-    // Skip spans with no alphabetic content (page numbers, bullet dots, etc.)
-    if (!hasAlpha(rawText)) return "";
+  // Clear sentence highlight whenever hover popup is dismissed
+  useEffect(() => {
+    if (hoverPopup === null) clearHighlight();
+  }, [hoverPopup, clearHighlight]);
 
-    const hasLatin = (t: string) => /[a-zA-ZÀ-ÖØ-öø-ÿ]/.test(t);
+  // Extract sentence using PDF-native textContent items directly.
+  // Bypasses text layer spans entirely for sentence detection — uses them only
+  // for initial hover detection. This ensures stable results regardless of
+  // which span the cursor lands on.
+  const extractSentence = useCallback(
+    async (
+      targetEl: Element,
+      mouseX: number,
+    ): Promise<{
+      text: string;
+      rects: { left: number; top: number; width: number; height: number }[];
+    }> => {
+      const rawText = (targetEl.textContent ?? "").trim();
+      // Korean: Hangul Jamo + Compatibility Jamo + Syllables. CJK + Japanese Kana.
+      // Excludes Enclosed Alphanumerics (Ⓐ U+24B6 etc.) which fell in the old \u1100-\uD7FF range.
+      const KOREAN_RE =
+        /[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF]/;
+      const CJK_RE = /[\u4E00-\u9FFF\u3040-\u30FF]/;
+      const isKoreanOrCJK = (t: string) => KOREAN_RE.test(t) || CJK_RE.test(t);
+      const hasAlpha = (t: string) =>
+        /[a-zA-ZÀ-ÖØ-öø-ÿ]/.test(t) || KOREAN_RE.test(t);
+      const hasLatin = (t: string) => /[a-zA-ZÀ-ÖØ-öø-ÿ]/.test(t);
 
-    // For Korean/CJK-only spans: return raw text
-    // For mixed German+Korean spans: strip Korean portion so popup shows only German
-    if (isKoreanOrCJK(rawText)) {
-      if (!hasLatin(rawText)) return rawText;
-      return rawText
-        .replace(/[\u1100-\uD7FF\u4E00-\u9FFF\u3040-\u30FF]+/g, " ")
+      if (!hasAlpha(rawText)) return { text: "", rects: [] };
+      if (isKoreanOrCJK(rawText)) {
+        const text = !hasLatin(rawText)
+          ? rawText
+          : rawText
+              .replace(
+                /[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF\u4E00-\u9FFF\u3040-\u30FF]+/g,
+                " ",
+              )
+              .replace(/\s+/g, " ")
+              .trim();
+        return { text, rects: [] };
+      }
+
+      // --- Load PDF textContent items (cached) ---
+      const cache = await ensureTextContent();
+      if (!cache) return { text: rawText, rects: [] };
+      const { items, rawViewport } = cache;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const textItems = items.filter(
+        (it: any) => typeof it.str === "string" && it.str.trim(),
+      );
+      if (textItems.length === 0) return { text: rawText, rects: [] };
+
+      // --- Match hovered span to a textContent item ---
+      const pageEl = containerRef.current?.querySelector(".react-pdf__Page");
+      const pageTop = pageEl?.getBoundingClientRect().top ?? 0;
+      const spanRect = targetEl.getBoundingClientRect();
+      const spanRelY = spanRect.top - pageTop;
+
+      // Match span text to textContent item — try exact match first,
+      // then fallback to stripped match (removes leading symbols like Ⓐ, ●, etc.)
+      const stripLeadingSymbols = (s: string) =>
+        s.replace(/^[^a-zA-ZÀ-ÖØ-öø-ÿ]+/, "");
+      const strippedRaw = stripLeadingSymbols(rawText);
+      let hoveredItemIdx = -1;
+      let bestDist = Infinity;
+      for (let i = 0; i < textItems.length; i++) {
+        const itemStr = textItems[i].str.trim();
+        if (itemStr !== rawText && stripLeadingSymbols(itemStr) !== strippedRaw)
+          continue;
+        const t = textItems[i].transform as number[];
+        const [, py] = rawViewport.convertToViewportPoint(t[4], t[5]);
+        const dist = Math.abs(py - spanRelY);
+        if (dist < bestDist) {
+          bestDist = dist;
+          hoveredItemIdx = i;
+        }
+      }
+      if (hoveredItemIdx === -1) {
+        console.log(
+          "[extract] no matching textContent item for:",
+          JSON.stringify(rawText),
+        );
+        return { text: rawText, rects: [] };
+      }
+
+      // --- Pass 1: Identify right-column items to exclude ---
+      // Group items by line (Y position), then within each line detect horizontal
+      // gaps > 50px. Items after the gap are right-column labels (e.g., "richtig oder falsch").
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const itemPositions = textItems.map((item: any) => {
+        const tr = item.transform as number[];
+        const [x, y] = rawViewport.convertToViewportPoint(tr[4], tr[5]);
+        const [x2] = rawViewport.convertToViewportPoint(
+          tr[4] + (item.width as number),
+          tr[5],
+        );
+        return { x, y, x2 };
+      });
+      const rightColumnItems = new Set<number>();
+      const lineGroups = new Map<number, number[]>();
+      for (let i = 0; i < textItems.length; i++) {
+        if (!textItems[i].str.trim()) continue;
+        const yKey = Math.round(itemPositions[i].y / 4) * 4;
+        if (!lineGroups.has(yKey)) lineGroups.set(yKey, []);
+        lineGroups.get(yKey)!.push(i);
+      }
+      // Step 1: Detect right-column items via same-line horizontal gaps
+      for (const [, indices] of lineGroups) {
+        indices.sort((a, b) => itemPositions[a].x - itemPositions[b].x);
+        for (let j = 1; j < indices.length; j++) {
+          if (
+            itemPositions[indices[j]].x - itemPositions[indices[j - 1]].x2 >
+            50
+          ) {
+            for (let k = j; k < indices.length; k++)
+              rightColumnItems.add(indices[k]);
+            break;
+          }
+        }
+      }
+
+      // Step 2: Detect isolated right-column lines (e.g., "richtig oder falsch" on its own line)
+      // Find the typical left margin from main-column lines
+      const mainLineLefts: number[] = [];
+      for (const [, indices] of lineGroups) {
+        const mainIndices = indices.filter((i) => !rightColumnItems.has(i));
+        if (mainIndices.length > 0) {
+          mainLineLefts.push(
+            Math.min(...mainIndices.map((i) => itemPositions[i].x)),
+          );
+        }
+      }
+      if (mainLineLefts.length >= 3) {
+        mainLineLefts.sort((a, b) => a - b);
+        const refLeftMargin =
+          mainLineLefts[Math.floor(mainLineLefts.length / 4)]; // 25th percentile
+        for (const [, indices] of lineGroups) {
+          // If ALL items on this line start far right of the main left margin → right column
+          if (indices.every((i) => itemPositions[i].x > refLeftMargin + 150)) {
+            for (const i of indices) rightColumnItems.add(i);
+          }
+        }
+      }
+
+      // DEBUG: log column detection results
+      const skippedTexts = [...rightColumnItems].map((i) =>
+        textItems[i].str.trim(),
+      );
+      console.log("[columns]", {
+        totalItems: textItems.length,
+        rightColumnCount: rightColumnItems.size,
+        skippedTexts,
+        lineGroupCount: lineGroups.size,
+        mainLineLefts: mainLineLefts.slice(0, 5),
+      });
+
+      // --- Pass 2: Build concat from the column the hovered item belongs to ---
+      // If hovered item is in right column, build concat from right-column items;
+      // otherwise build from main-column items. This allows hovering on both columns.
+      const hoveredInRightCol = rightColumnItems.has(hoveredItemIdx);
+      const itemMap: { itemIdx: number; charStart: number; charEnd: number }[] =
+        [];
+      let concat = "";
+      for (let i = 0; i < textItems.length; i++) {
+        const inRightCol = rightColumnItems.has(i);
+        if (hoveredInRightCol ? !inRightCol : inRightCol) continue;
+        const str = textItems[i].str.trim();
+        if (!str) continue;
+        // Skip Korean-dominant items to prevent them from contaminating
+        // German sentence boundary detection. An item is Korean-dominant
+        // if it contains Korean/CJK and Korean chars outnumber Latin chars.
+        if (isKoreanOrCJK(str)) {
+          const korCount = (
+            str.match(
+              /[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF\u4E00-\u9FFF\u3040-\u30FF]/g,
+            ) || []
+          ).length;
+          const latCount = (str.match(/[a-zA-ZÀ-ÖØ-öø-ÿ]/g) || []).length;
+          if (korCount > latCount) continue;
+        }
+        if (concat.length > 0) concat += " ";
+        const charStart = concat.length;
+        concat += str;
+        itemMap.push({ itemIdx: i, charStart, charEnd: concat.length });
+      }
+
+      // --- Find hovered position in concatenated text using mouse X ---
+      const hoveredEntry = itemMap.find((e) => e.itemIdx === hoveredItemIdx);
+      if (!hoveredEntry) return { text: rawText, rects: [] };
+      // Use mouse X position relative to the span to pinpoint character position
+      const elRect = targetEl.getBoundingClientRect();
+      const xFrac =
+        elRect.width > 0
+          ? Math.max(0, Math.min(1, (mouseX - elRect.left) / elRect.width))
+          : 0.5;
+      const itemLen = hoveredEntry.charEnd - hoveredEntry.charStart;
+      const hoveredCharPos =
+        hoveredEntry.charStart + Math.floor(xFrac * itemLen);
+
+      // --- German-aware sentence boundary detection ---
+      // Rule: "." + space (or end) = sentence end, UNLESS word before "." is a known abbreviation.
+      // This correctly handles "beliebt. richtig" (sentence end) vs "z.B. und" (abbreviation).
+      const isSentenceEnd = (pos: number): boolean => {
+        const ch = concat[pos];
+        if (ch === "!" || ch === "?") return true;
+        if (ch !== ".") return false;
+        // Ellipsis "..." — not a sentence end
+        if (concat[pos + 1] === ".") return false;
+        // Must be followed by space or end of text
+        if (pos + 1 < concat.length && concat[pos + 1] !== " ") return false;
+        // Check word before dot against abbreviation list
+        let ws = pos - 1;
+        while (ws >= 0 && /[a-zA-ZÀ-ÖØ-öø-ÿ.]/.test(concat[ws])) ws--;
+        ws++;
+        const word = concat.slice(ws, pos);
+        if (GERMAN_ABBREVS.some((a) => a.toLowerCase() === word.toLowerCase()))
+          return false;
+        // Single uppercase letter + dot = initial (e.g., "A." "B.") — not sentence end
+        if (pos - ws === 1 && /[A-ZÀ-ÖØ-Ý]/.test(word)) return false;
+        // Number + dot = list item (e.g., "1." "2.") — treat as sentence boundary
+        return true;
+      };
+
+      // Enclosed alphanumerics (Ⓐ Ⓑ ① ② etc.) act as section/option boundaries
+      const isEnclosedAlphanumeric = (ch: string) =>
+        ch.charCodeAt(0) >= 0x2460 && ch.charCodeAt(0) <= 0x24ff;
+
+      let sentCharStart = 0;
+      for (let i = hoveredCharPos - 1; i >= 0; i--) {
+        if (".!?".includes(concat[i]) && isSentenceEnd(i)) {
+          sentCharStart = i + 1;
+          break;
+        }
+        if (isEnclosedAlphanumeric(concat[i])) {
+          sentCharStart = i;
+          break;
+        }
+      }
+      // Skip whitespace and decorative symbols at sentence start
+      while (
+        sentCharStart < concat.length &&
+        /[\s\u2460-\u24FF\u2700-\u27BF●■□▪▫◆◇★☆►▶‣⁃※†‡§¶]/.test(
+          concat[sentCharStart],
+        )
+      )
+        sentCharStart++;
+
+      let sentCharEnd = concat.length;
+      for (let i = hoveredCharPos; i < concat.length; i++) {
+        if (".!?".includes(concat[i]) && isSentenceEnd(i)) {
+          sentCharEnd = i + 1;
+          break;
+        }
+        // Stop before the next enclosed alphanumeric (next option/section)
+        if (isEnclosedAlphanumeric(concat[i]) && i > hoveredCharPos) {
+          sentCharEnd = i;
+          break;
+        }
+      }
+
+      // German sentences always start with an uppercase letter.
+      // Skip non-sentence tokens at the start: numbers ("65"), control chars,
+      // enclosed alphanumerics, lowercase words ("einsteigen"), heading annotations
+      // ("Können(Modalverben)"), and standalone single words ("können").
+      while (sentCharStart < sentCharEnd) {
+        const ch = concat[sentCharStart];
+        if (!ch) break;
+        // Skip: non-uppercase chars (digits, lowercase, symbols, control chars)
+        if (!/[A-ZÀ-ÖØ-Ý]/.test(ch)) {
+          const nextSpace = concat.indexOf(" ", sentCharStart);
+          if (nextSpace === -1 || nextSpace >= sentCharEnd) break;
+          sentCharStart = nextSpace + 1;
+          continue;
+        }
+        // Check the current token (up to next space)
+        const tokenEnd = concat.indexOf(" ", sentCharStart);
+        const token =
+          tokenEnd === -1 || tokenEnd >= sentCharEnd
+            ? concat.slice(sentCharStart, sentCharEnd)
+            : concat.slice(sentCharStart, tokenEnd);
+        // Skip tokens with parenthetical annotations: "Können(Modalverben)", "Präfix(접두사)"
+        if (/\(/.test(token)) {
+          if (tokenEnd === -1 || tokenEnd >= sentCharEnd) break;
+          sentCharStart = tokenEnd + 1;
+          continue;
+        }
+        // Skip single capitalized words followed by a lowercase word — these are
+        // vocabulary labels like "können" preceded by heading "Können"
+        // Real sentences have at least 2 words starting from the uppercase token.
+        if (tokenEnd !== -1 && tokenEnd < sentCharEnd) {
+          const nextCh = concat[tokenEnd + 1];
+          if (nextCh && /[a-zà-öø-ÿ]/.test(nextCh)) {
+            // The next word is lowercase — this uppercase token + lowercase word
+            // might still be a real sentence ("Das ist..."). Only skip if the
+            // uppercase token is a single word with no following sentence structure.
+            // Heuristic: if the token after this lowercase word starts uppercase,
+            // skip both (heading + vocab label pattern).
+            const nextTokenEnd = concat.indexOf(" ", tokenEnd + 1);
+            if (nextTokenEnd !== -1 && nextTokenEnd < sentCharEnd) {
+              const afterNext = concat[nextTokenEnd + 1];
+              if (afterNext && /[A-ZÀ-ÖØ-Ý]/.test(afterNext)) {
+                // Pattern: "Können können Ihr..." → skip "Können können", keep "Ihr..."
+                sentCharStart = nextTokenEnd + 1;
+                continue;
+              }
+            }
+          }
+        }
+        // Uppercase letter, not a heading/label pattern — valid sentence start
+        break;
+      }
+
+      // Skip heading annotations with parentheses: "Trennbare Verben Präfix(접두사)* + Verb(동사)"
+      // Find the last ")" before the hovered position and advance past it if the next
+      // substantive token starts with an uppercase letter (= real sentence start).
+      {
+        let lastParenEnd = -1;
+        for (let p = sentCharStart; p < hoveredCharPos; p++) {
+          if (concat[p] === ")") lastParenEnd = p;
+        }
+        if (lastParenEnd > sentCharStart) {
+          // Advance past ")" and any trailing non-alpha chars (*, +, spaces)
+          let candidate = lastParenEnd + 1;
+          while (
+            candidate < sentCharEnd &&
+            /[\s*+\-□\u001a]/.test(concat[candidate])
+          )
+            candidate++;
+          // Only advance if we land on an uppercase letter (real sentence start)
+          if (
+            candidate < hoveredCharPos &&
+            /[A-ZÀ-ÖØ-Ý]/.test(concat[candidate])
+          ) {
+            sentCharStart = candidate;
+          }
+        }
+      }
+
+      // Skip dialogue speaker labels (e.g., "Jana :", "Peter:", "Leo :")
+      // Search for the LAST "Name :" pattern before the hovered position,
+      // so labels preceded by exercise numbering/vocab lists are still caught.
+      {
+        const NAME_COLON_RE = /\b([A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ]*)\s*:/g;
+        let lastColonEnd = -1;
+        let m: RegExpExecArray | null;
+        while ((m = NAME_COLON_RE.exec(concat)) !== null) {
+          const colonPos = m.index + m[0].length - 1; // position of ":"
+          if (colonPos >= sentCharStart && colonPos < hoveredCharPos) {
+            lastColonEnd = colonPos + 1;
+          }
+        }
+        if (lastColonEnd > sentCharStart) {
+          sentCharStart = lastColonEnd;
+          while (sentCharStart < sentCharEnd && concat[sentCharStart] === " ")
+            sentCharStart++;
+        }
+      }
+
+      // If the hovered position fell in a skipped label region (before the real sentence),
+      // return empty — the user is hovering on a label, not a sentence.
+      if (hoveredCharPos < sentCharStart) return { text: "", rects: [] };
+
+      // Validate that the extracted sentence is a real German sentence, not
+      // exercise labels, repeated fragments, or book metadata.
+      {
+        const sentText = concat.slice(sentCharStart, sentCharEnd).trim();
+        const words = sentText.split(/\s+/).filter(Boolean);
+
+        // Too short to be a sentence
+        if (words.length < 3) return { text: "", rects: [] };
+
+        // Exercise labels: "b)", "c)", "1)", "2)" etc.
+        if (/\b[a-z0-9]\)\s/.test(sentText)) return { text: "", rects: [] };
+
+        // Audio/media markers
+        if (/\bMP3\b|\bCD\b|\bTrack\b/i.test(sentText))
+          return { text: "", rects: [] };
+
+        // Book title metadata
+        if (/Zusammen\s+[A-C][0-9]/i.test(sentText))
+          return { text: "", rects: [] };
+
+        // Repetition check: any 2-word sequence appearing 2+ times = fragment list
+        const seq2: Record<string, number> = {};
+        for (let i = 0; i < words.length - 1; i++) {
+          const key = `${words[i].toLowerCase()} ${words[i + 1].toLowerCase()}`;
+          seq2[key] = (seq2[key] ?? 0) + 1;
+          if (seq2[key] >= 2) return { text: "", rects: [] };
+        }
+      }
+
+      // DEBUG: log sentence detection
+      const contextStart = Math.max(0, sentCharStart - 30);
+      const contextEnd = Math.min(concat.length, sentCharEnd + 30);
+      console.log("[sentence]", {
+        hoveredSpan: rawText,
+        hoveredCharPos,
+        sentRange: `${sentCharStart}-${sentCharEnd}`,
+        sentence: concat.slice(sentCharStart, sentCharEnd),
+        contextBefore: concat.slice(contextStart, sentCharStart),
+        contextAfter: concat.slice(sentCharEnd, contextEnd),
+      });
+
+      // --- Map sentence back to textContent items + compute rects from PDF coords ---
+      const overlapping = itemMap.filter(
+        (e) => e.charEnd > sentCharStart && e.charStart < sentCharEnd,
+      );
+      const rects: {
+        left: number;
+        top: number;
+        width: number;
+        height: number;
+      }[] = [];
+
+      // Find matching text layer spans for measureText font matching
+      const textLayerEl = containerRef.current?.querySelector(
+        ".react-pdf__Page__textContent",
+      );
+      const textLayerSpans = textLayerEl
+        ? Array.from(textLayerEl.querySelectorAll("span"))
+        : [];
+
+      for (let i = 0; i < overlapping.length; i++) {
+        const entry = overlapping[i];
+        const item = textItems[entry.itemIdx];
+        const t = item.transform as number[];
+        const fontSize = Math.abs(t[3]);
+        const pdfX = t[4];
+        const pdfY = t[5];
+        const pdfW = item.width as number;
+        const itemStr = item.str as string;
+
+        const [x1, y1] = rawViewport.convertToViewportPoint(pdfX, pdfY);
+        const [x2, y2] = rawViewport.convertToViewportPoint(
+          pdfX + pdfW,
+          pdfY + fontSize,
+        );
+        const fullWidth = Math.abs(x2 - x1);
+
+        // Clip first/last items if sentence boundary is mid-item
+        // Use measureText() for accurate sub-string width calculation
+        let fracLeft = 0;
+        let fracRight = 1;
+        const needsClip =
+          (i === 0 && sentCharStart > entry.charStart) ||
+          (i === overlapping.length - 1 && sentCharEnd < entry.charEnd);
+
+        if (needsClip) {
+          // Find matching span for font info
+          const itemText = itemStr.trim();
+          const stripSym = (s: string) => s.replace(/^[^a-zA-ZÀ-ÖØ-öø-ÿ]+/, "");
+          const matchSpan = textLayerSpans.find((sp) => {
+            const spText = (sp.textContent ?? "").trim();
+            return (
+              spText === itemText || stripSym(spText) === stripSym(itemText)
+            );
+          });
+
+          const ctx = document.createElement("canvas").getContext("2d");
+          if (ctx && matchSpan) {
+            ctx.font = window.getComputedStyle(matchSpan).font;
+            const fullW = ctx.measureText(itemStr).width;
+            if (fullW > 0) {
+              if (i === 0 && sentCharStart > entry.charStart) {
+                const clipChars = sentCharStart - entry.charStart;
+                fracLeft =
+                  ctx.measureText(itemStr.slice(0, clipChars)).width / fullW;
+              }
+              if (i === overlapping.length - 1 && sentCharEnd < entry.charEnd) {
+                const keepChars = sentCharEnd - entry.charStart;
+                fracRight =
+                  ctx.measureText(itemStr.slice(0, keepChars)).width / fullW;
+              }
+            }
+          } else {
+            // Fallback to character-count ratio
+            const itemLen = entry.charEnd - entry.charStart;
+            if (itemLen > 0) {
+              if (i === 0 && sentCharStart > entry.charStart) {
+                fracLeft = (sentCharStart - entry.charStart) / itemLen;
+              }
+              if (i === overlapping.length - 1 && sentCharEnd < entry.charEnd) {
+                fracRight = (sentCharEnd - entry.charStart) / itemLen;
+              }
+            }
+          }
+        }
+
+        rects.push({
+          left: Math.min(x1, x2) + fullWidth * fracLeft,
+          top: Math.min(y1, y2),
+          width: fullWidth * (fracRight - fracLeft),
+          height: Math.abs(y2 - y1),
+        });
+      }
+
+      // Strip decorative symbols (Ⓐ Ⓑ ● ■ etc.) from the final text
+      const sentenceText = concat
+        .slice(sentCharStart, sentCharEnd)
+        .replace(/[\u2460-\u24FF\u2700-\u27BF●■□▪▫◆◇★☆►▶‣⁃※†‡§¶]/g, "")
         .replace(/\s+/g, " ")
         .trim();
-    }
-
-    // Collect all visible spans sorted by reading order (top→bottom, left→right)
-    const allSpans = Array.from(textLayer.querySelectorAll("span")).filter(
-      (s) => {
-        const r = s.getBoundingClientRect();
-        return r.width > 0 || r.height > 0;
-      },
-    );
-    allSpans.sort((a, b) => {
-      const ra = a.getBoundingClientRect();
-      const rb = b.getBoundingClientRect();
-      const dy = ra.top - rb.top;
-      if (Math.abs(dy) > 3) return dy;
-      return ra.left - rb.left;
-    });
-
-    const hoveredIdx = allSpans.indexOf(targetEl as HTMLElement);
-    if (hoveredIdx === -1) return rawText;
-
-    // Walk backward: stop at Korean/CJK, pure-symbol, or span ending with .!?
-    let sentStartIdx = hoveredIdx;
-    for (let i = hoveredIdx - 1; i >= Math.max(0, hoveredIdx - 40); i--) {
-      const t = (allSpans[i].textContent ?? "").trim();
-      if (isKoreanOrCJK(t) || isPureNonAlpha(t) || endsPunct(t)) break;
-      sentStartIdx = i;
-    }
-
-    // Walk forward: stop at Korean/CJK, pure-symbol, or after span ending with .!?
-    // Skip if the hovered span itself already ends with punctuation.
-    let sentEndIdx = hoveredIdx;
-    if (!endsPunct(rawText)) {
-      for (
-        let i = hoveredIdx + 1;
-        i < Math.min(allSpans.length, hoveredIdx + 40);
-        i++
-      ) {
-        const t = (allSpans[i].textContent ?? "").trim();
-        if (isKoreanOrCJK(t) || isPureNonAlpha(t)) break;
-        sentEndIdx = i;
-        if (endsPunct(t)) break;
-      }
-    }
-
-    const parts: string[] = [];
-    for (let i = sentStartIdx; i <= sentEndIdx; i++) {
-      parts.push((allSpans[i].textContent ?? "").trim());
-    }
-    return parts.join(" ").replace(/\s+/g, " ").trim();
-  }, []);
+      return { text: sentenceText, rects };
+    },
+    [ensureTextContent],
+  );
 
   // Hover detection on the PDF container
   useEffect(() => {
@@ -489,14 +1123,14 @@ export default function PdfViewer({
       if (!el || !textLayer.contains(el)) {
         clearShow();
         clearHide();
-        hoverHideTimer.current = setTimeout(() => setHoverPopup(null), 200);
+        hoverHideTimer.current = setTimeout(() => setHoverPopup(null), 100);
         return;
       }
       // Only trigger on leaf text elements (no child elements, has text content)
       if (el.childElementCount > 0 || !(el.textContent ?? "").trim()) {
         clearShow();
         clearHide();
-        hoverHideTimer.current = setTimeout(() => setHoverPopup(null), 200);
+        hoverHideTimer.current = setTimeout(() => setHoverPopup(null), 100);
         return;
       }
       // Only trigger if span contains a Latin letter.
@@ -507,22 +1141,26 @@ export default function PdfViewer({
       if (!hasLatinLetter) {
         clearShow();
         clearHide();
-        hoverHideTimer.current = setTimeout(() => setHoverPopup(null), 200);
+        hoverHideTimer.current = setTimeout(() => setHoverPopup(null), 100);
         return;
       }
       clearHide();
       clearShow();
-      hoverShowTimer.current = setTimeout(() => {
+      hoverShowTimer.current = setTimeout(async () => {
         if (popupActiveRef.current) return;
-        const text = extractSentenceText(el);
-        if (text && /[a-zA-ZÀ-ÖØ-öø-ÿ]/.test(text))
+        const { text, rects } = await extractSentence(el, e.clientX);
+        if (text && /[a-zA-ZÀ-ÖØ-öø-ÿ]/.test(text)) {
+          clearHighlight();
+          setHighlightRects(rects);
           setHoverPopup({ x: e.clientX, y: e.clientY, text });
+        }
       }, 400);
     };
 
     const handleMouseLeave = () => {
       clearShow();
       clearHide();
+      clearHighlight();
       hoverHideTimer.current = setTimeout(() => setHoverPopup(null), 300);
     };
 
@@ -533,8 +1171,9 @@ export default function PdfViewer({
       container.removeEventListener("mouseleave", handleMouseLeave);
       clearShow();
       clearHide();
+      clearHighlight();
     };
-  }, [extractSentenceText, file]);
+  }, [extractSentence, file, clearHighlight]);
 
   // caretRangeFromPoint with Firefox fallback
   function getCaretRange(x: number, y: number): Range | null {
@@ -560,18 +1199,82 @@ export default function PdfViewer({
       }
 
       const hoverPopupEl = document.getElementById("pdf-hover-popup");
-      if (hoverPopupEl && !hoverPopupEl.contains(e.target as Node)) setHoverPopup(null);
+      if (hoverPopupEl && !hoverPopupEl.contains(e.target as Node))
+        setHoverPopup(null);
 
       const textLayer = containerRef.current?.querySelector(
         ".react-pdf__Page__textContent",
       );
-      dragStartPoint.current = textLayer?.contains(e.target as Node)
-        ? { x: e.clientX, y: e.clientY }
-        : null;
+      // Check if click is on a popup (selection or hover) — don't clear in that case
+      const selPopupEl = document.getElementById("pdf-selection-popup");
+      const hvrPopupEl = document.getElementById("pdf-hover-popup");
+      const isOnPopup =
+        selPopupEl?.contains(e.target as Node) ||
+        hvrPopupEl?.contains(e.target as Node);
+
+      if (textLayer?.contains(e.target as Node)) {
+        dragStartPoint.current = { x: e.clientX, y: e.clientY };
+        isDragging.current = true;
+        // Clear previous selection and hover highlight when starting new drag
+        setSelectionRects([]);
+        setHighlightRects([]);
+      } else if (!isOnPopup) {
+        dragStartPoint.current = null;
+        // Focus-out: clicking outside text layer and popups clears selection
+        setSelectionRects([]);
+        setPopup(null);
+      }
+    };
+
+    const handleMouseMoveDrag = async (e: MouseEvent) => {
+      if (!isDragging.current || !dragStartPoint.current) return;
+      const start = dragStartPoint.current;
+      const dx = e.clientX - start.x,
+        dy = e.clientY - start.y;
+      if (dx * dx + dy * dy < 25) return; // minimum drag distance
+
+      const textLayer = containerRef.current?.querySelector(
+        ".react-pdf__Page__textContent",
+      );
+      if (!textLayer) return;
+
+      const startCaret = getCaretRange(start.x, start.y);
+      const endCaret = getCaretRange(e.clientX, e.clientY);
+      if (!startCaret || !endCaret) return;
+      if (
+        !textLayer.contains(startCaret.startContainer) ||
+        !textLayer.contains(endCaret.startContainer)
+      )
+        return;
+
+      try {
+        const cmp = startCaret.compareBoundaryPoints(
+          Range.START_TO_START,
+          endCaret,
+        );
+        const range = document.createRange();
+        if (cmp <= 0) {
+          range.setStart(startCaret.startContainer, startCaret.startOffset);
+          range.setEnd(endCaret.startContainer, endCaret.startOffset);
+        } else {
+          range.setStart(endCaret.startContainer, endCaret.startOffset);
+          range.setEnd(startCaret.startContainer, startCaret.startOffset);
+        }
+        const text = range.toString().trim();
+        if (!text) {
+          setSelectionRects([]);
+          return;
+        }
+        const rects = await computeRangeRects(range, textLayer);
+        setSelectionRects(rects);
+      } catch {
+        /* ignore */
+      }
     };
 
     const handleMouseUp = (e: MouseEvent) => {
-      setTimeout(() => {
+      isDragging.current = false;
+      setTimeout(async () => {
         const textLayer = containerRef.current?.querySelector(
           ".react-pdf__Page__textContent",
         );
@@ -610,13 +1313,15 @@ export default function PdfViewer({
           const text = range.toString().trim();
           if (!text) {
             setPopup(null);
-            window.getSelection()?.removeAllRanges();
             return;
           }
 
           const sel = window.getSelection();
           sel?.removeAllRanges();
           sel?.addRange(range);
+
+          const rects = await computeRangeRects(range, textLayer);
+          setSelectionRects(rects);
           setPopup({ x: e.clientX, y: e.clientY, text });
         } catch {
           setPopup(null);
@@ -624,13 +1329,42 @@ export default function PdfViewer({
       }, 10);
     };
 
+    const handleDblClick = (e: MouseEvent) => {
+      const textLayer = containerRef.current?.querySelector(
+        ".react-pdf__Page__textContent",
+      );
+      if (!textLayer?.contains(e.target as Node)) return;
+      // Browser word-selects on dblclick; read that selection after
+      // handleMouseUp's timeout (10ms) has already run and skipped.
+      setTimeout(async () => {
+        const sel = window.getSelection();
+        if (!sel || sel.isCollapsed) return;
+        try {
+          const range = sel.getRangeAt(0);
+          if (!textLayer.contains(range.commonAncestorContainer)) return;
+          const text = range.toString().trim();
+          if (!text) return;
+
+          const rects = await computeRangeRects(range, textLayer);
+          setSelectionRects(rects);
+          setPopup({ x: e.clientX, y: e.clientY, text });
+        } catch {
+          /* ignore */
+        }
+      }, 50);
+    };
+
     document.addEventListener("mousedown", handleMouseDown);
+    document.addEventListener("mousemove", handleMouseMoveDrag);
     document.addEventListener("mouseup", handleMouseUp);
+    document.addEventListener("dblclick", handleDblClick);
     return () => {
       document.removeEventListener("mousedown", handleMouseDown);
+      document.removeEventListener("mousemove", handleMouseMoveDrag);
       document.removeEventListener("mouseup", handleMouseUp);
+      document.removeEventListener("dblclick", handleDblClick);
     };
-  }, []);
+  }, [computeRangeRects]);
 
   const handleFileChange = useCallback(
     (f: File) => {
@@ -649,7 +1383,9 @@ export default function PdfViewer({
       const updated = upsertLibraryMeta(f);
       setLibrary(updated);
       localStorage.setItem(LIBRARY_CURRENT_KEY, f.name);
-      savePdfToLibrary(f).catch(() => { /* ignore IDB errors */ });
+      savePdfToLibrary(f).catch(() => {
+        /* ignore IDB errors */
+      });
     },
     [onPageImageChange],
   );
@@ -681,43 +1417,49 @@ export default function PdfViewer({
     onClose?.();
   };
 
-  const handleLoadFromLibrary = useCallback(async (name: string) => {
-    const f = await loadPdfFromLibrary(name);
-    if (!f) {
-      // IDB entry gone — remove stale meta
-      setLibrary(removeLibraryMeta(name));
-      return;
-    }
-    setFile(f);
-    setNumPages(0);
-    setPopup(null);
-    setShowSearch(false);
-    setSearchQuery("");
-    setSearchResults([]);
-    setToc([]);
-    setTocIsGenerated(false);
-    setShowToc(false);
-    pdfDocRef.current = null;
-    onPageImageChange(null);
-    const updated = upsertLibraryMeta(f);
-    setLibrary(updated);
-    localStorage.setItem(LIBRARY_CURRENT_KEY, name);
-  }, [onPageImageChange]);
-
-  const handleDeleteFromLibrary = useCallback(async (name: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    await deletePdfFromLibrary(name);
-    setLibrary(removeLibraryMeta(name));
-    if (file?.name === name) {
-      setFile(null);
+  const handleLoadFromLibrary = useCallback(
+    async (name: string) => {
+      const f = await loadPdfFromLibrary(name);
+      if (!f) {
+        // IDB entry gone — remove stale meta
+        setLibrary(removeLibraryMeta(name));
+        return;
+      }
+      setFile(f);
+      setNumPages(0);
       setPopup(null);
+      setShowSearch(false);
+      setSearchQuery("");
+      setSearchResults([]);
       setToc([]);
       setTocIsGenerated(false);
+      setShowToc(false);
       pdfDocRef.current = null;
       onPageImageChange(null);
-      localStorage.removeItem(LIBRARY_CURRENT_KEY);
-    }
-  }, [file?.name, onPageImageChange]);
+      const updated = upsertLibraryMeta(f);
+      setLibrary(updated);
+      localStorage.setItem(LIBRARY_CURRENT_KEY, name);
+    },
+    [onPageImageChange],
+  );
+
+  const handleDeleteFromLibrary = useCallback(
+    async (name: string, e: React.MouseEvent) => {
+      e.stopPropagation();
+      await deletePdfFromLibrary(name);
+      setLibrary(removeLibraryMeta(name));
+      if (file?.name === name) {
+        setFile(null);
+        setPopup(null);
+        setToc([]);
+        setTocIsGenerated(false);
+        pdfDocRef.current = null;
+        onPageImageChange(null);
+        localStorage.removeItem(LIBRARY_CURRENT_KEY);
+      }
+    },
+    [file?.name, onPageImageChange],
+  );
 
   // Empty state
   if (isRestoring) {
@@ -792,7 +1534,9 @@ export default function PdfViewer({
         {/* Recent files list */}
         {library.length > 0 && (
           <div className="mt-6 w-full max-w-sm">
-            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2 px-1">최근 파일</p>
+            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2 px-1">
+              최근 파일
+            </p>
             <div className="space-y-1.5">
               {library.map((entry) => (
                 <div
@@ -801,15 +1545,38 @@ export default function PdfViewer({
                   className="flex items-center gap-3 px-3 py-2.5 rounded-xl bg-white border border-gray-200 hover:border-blue-300 hover:bg-blue-50 cursor-pointer group transition-colors"
                 >
                   {/* PDF icon */}
-                  <svg className="w-8 h-8 text-red-400 shrink-0" fill="currentColor" viewBox="0 0 24 24">
-                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" opacity={0.3} />
-                    <path d="M14 2v6h6M9 13h6M9 17h4" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" />
-                    <path d="M14 2v6h6" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
+                  <svg
+                    className="w-8 h-8 text-red-400 shrink-0"
+                    fill="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z"
+                      opacity={0.3}
+                    />
+                    <path
+                      d="M14 2v6h6M9 13h6M9 17h4"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth={1.5}
+                      strokeLinecap="round"
+                    />
+                    <path
+                      d="M14 2v6h6"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth={1.5}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
                   </svg>
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-gray-800 truncate">{entry.name}</p>
+                    <p className="text-sm font-medium text-gray-800 truncate">
+                      {entry.name}
+                    </p>
                     <p className="text-xs text-gray-400 mt-0.5">
-                      {formatFileSize(entry.size)} · {formatLastOpened(entry.lastOpened)}
+                      {formatFileSize(entry.size)} ·{" "}
+                      {formatLastOpened(entry.lastOpened)}
                     </p>
                   </div>
                   <button
@@ -817,8 +1584,18 @@ export default function PdfViewer({
                     title="목록에서 삭제"
                     className="opacity-0 group-hover:opacity-100 p-1 rounded-md text-gray-400 hover:text-red-500 hover:bg-red-50 transition-all shrink-0"
                   >
-                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    <svg
+                      className="w-3.5 h-3.5"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                      strokeWidth={2}
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                      />
                     </svg>
                   </button>
                 </div>
@@ -1080,6 +1857,7 @@ export default function PdfViewer({
       <div className="flex-1 overflow-y-auto flex justify-center px-4 py-4">
         <Document
           file={file}
+          options={DOCUMENT_OPTIONS}
           onLoadSuccess={async (pdf) => {
             setNumPages(pdf.numPages);
             pdfDocRef.current = pdf;
@@ -1116,30 +1894,64 @@ export default function PdfViewer({
             </div>
           }
         >
-          <Page
-            pageNumber={pageNumber}
-            renderTextLayer={true}
-            renderAnnotationLayer={false}
-            className="shadow-md"
-            width={Math.min(
-              (containerRef.current?.clientWidth ?? 600) - 32,
-              760,
-            )}
-            onRenderSuccess={() => {
-              const canvas = containerRef.current?.querySelector(
-                "canvas",
-              ) as HTMLCanvasElement | null;
-              if (!canvas) return;
-              try {
-                const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
-                onPageImageChange(
-                  dataUrl.replace("data:image/jpeg;base64,", ""),
-                );
-              } catch {
-                onPageImageChange(null);
-              }
-            }}
-          />
+          <div className="relative">
+            <Page
+              pageNumber={pageNumber}
+              renderTextLayer={true}
+              renderAnnotationLayer={false}
+              className="shadow-md"
+              width={Math.min(
+                (containerRef.current?.clientWidth ?? 600) - 32,
+                760,
+              )}
+              onRenderSuccess={() => {
+                const canvas = containerRef.current?.querySelector(
+                  "canvas",
+                ) as HTMLCanvasElement | null;
+                if (!canvas) return;
+                try {
+                  const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
+                  onPageImageChange(
+                    dataUrl.replace("data:image/jpeg;base64,", ""),
+                  );
+                } catch {
+                  onPageImageChange(null);
+                }
+              }}
+            />
+            {/* Canvas-accurate hover highlight overlay (light blue) */}
+            {highlightRects.map((rect, i) => (
+              <div
+                key={`h-${i}`}
+                className="absolute pointer-events-none"
+                style={{
+                  left: rect.left,
+                  top: rect.top,
+                  width: rect.width,
+                  height: rect.height,
+                  backgroundColor: "rgba(250, 204, 21, 0.35)",
+                  borderRadius: 2,
+                  zIndex: 3,
+                }}
+              />
+            ))}
+            {/* Canvas-accurate selection highlight overlay (darker blue) */}
+            {selectionRects.map((rect, i) => (
+              <div
+                key={`s-${i}`}
+                className="absolute pointer-events-none"
+                style={{
+                  left: rect.left,
+                  top: rect.top,
+                  width: rect.width,
+                  height: rect.height,
+                  backgroundColor: "rgba(250, 204, 21, 0.45)",
+                  borderRadius: 2,
+                  zIndex: 4,
+                }}
+              />
+            ))}
+          </div>
         </Document>
       </div>
 
@@ -1231,9 +2043,7 @@ export default function PdfViewer({
           className="fixed z-40 bg-white border border-gray-200 rounded-xl shadow-md overflow-hidden flex"
           style={{
             left: Math.min(hoverPopup.x - 4, window.innerWidth - 220),
-            top: hoverPopup.y - 52 < 8
-              ? hoverPopup.y + 20
-              : hoverPopup.y - 52,
+            top: hoverPopup.y - 52 < 8 ? hoverPopup.y + 20 : hoverPopup.y - 52,
           }}
           onMouseEnter={() => {
             if (hoverHideTimer.current) clearTimeout(hoverHideTimer.current);

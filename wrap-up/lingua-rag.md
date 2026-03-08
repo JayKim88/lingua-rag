@@ -4,6 +4,79 @@
 > **Scope**: Full stack (backend + frontend + infra)
 > **Live**: https://lingua-rag.vercel.app
 
+## Session: 2026-03-08 22:54
+
+> **Context**: PDF drag/selection bug investigation + WORTLISTE-A1 RAG indexing + hover sentence validation filter
+
+### Done
+- chore(rag): `scripts/index_wortliste.py` new — WORTLISTE-A1 dedicated indexing script (176 chunks, `textbook_id="wortliste-a1"`, `unit_id=None`, `LESSON_START_PAGE=7`, filters "License Number:" watermark)
+- feat(rag): Indexed WORTLISTE-A1 into DB — 176 chunks covering all A1 vocabulary (topics: Kennenlernen, Familie, Zeit, Essen, Gegenstände, Fortbewegung, Datum, Körper)
+- feat(rag): `VectorSearchRepository.search_vocabulary()` — cross-unit vocabulary search, `max_distance=0.65` (stricter than textbook 0.7)
+- feat(rag): Dual parallel RAG search in `chat.py` — `asyncio.gather()` runs textbook search (unit-scoped, top 2) + vocabulary search (wortliste-a1, top 2) simultaneously
+- feat(rag): Enable RAG — `RAG_ENABLED=True` set in `backend/.env`
+- fix(pdf): `extractSentence` — add `isValidGermanSentence` guard after sentence boundary detection; blocks hover on non-sentence content:
+  - Less than 3 words
+  - Exercise labels: `b)`, `c)`, `1)` patterns
+  - Audio markers: `MP3`, `CD`, `Track`
+  - Book title metadata: `Zusammen A1` pattern
+  - Repeated 2-word sequences (≥2 occurrences) — catches "richtig oder falsch richtig oder falsch..."
+
+### Decisions
+- **WORTLISTE `unit_id=None`**: Vocabulary list is topic-organized (Kennenlernen, Essen…), not lesson-ordered. No unit-scoping; searched globally across entire wortliste
+- **Dual search strategy**: textbook (lesson content, broader threshold 0.7) + wortliste (vocabulary definitions, stricter 0.65). Combined top 4 chunks give LLM both lesson context and exact word definitions
+- **RAG via .env not config.py default**: Changing `RAG_ENABLED` in `.env` is deployment-safe; default in code stays `False` so the feature can be toggled without code changes
+
+### Issues
+- **PDF drag/double-click still broken**: Multiple fix attempts (binary search `findCaretAt`, `user-select: none` + `e.preventDefault()`) were reverted at user request. Root causes identified but no solution accepted yet:
+  - `caretRangeFromPoint` returns wrong offsets due to pdfjs `scaleX` CSS transform
+  - `user-select: none` breaks `range.getClientRects()` and `window.getSelection().addRange()`
+- **Hover box regression (original code)**: Hover effect `useEffect([], [])` runs at mount when `isRestoring=true` → `containerRef.current` is null → listener never attached. Fix identified (`[]` → `[file]`) but not yet applied
+
+### Next
+- [ ] Fix hover useEffect dependency: `[]` → `[file]` so listener attaches after PDF loads
+- [ ] Fix double-click word selection — `handleDblClick` with `findCaretAt` + `wordBoundaries` (no `user-select: none`; use `e.preventDefault()` in mousedown instead)
+- [ ] Consider migrating to `@react-pdf-viewer/core` — better scaleX transform handling for drag selection accuracy
+- [ ] Restart backend server to apply RAG changes
+- [ ] Test WORTLISTE RAG: ask "Freund 관사가 뭐야?" and verify wortliste chunk appears in logs
+- [ ] Remove debug `console.log` from `PdfViewer.tsx` (`[extract]`, `[columns]`, `[sentence]`)
+- [ ] Hover popup edge positioning — viewport top overflow fallback
+
+---
+
+## Session: 2026-03-08 22:54
+
+> **Context**: Chat text hover/selection UX — match PDF behavior (German-only highlight, speaker prefix exclusion, popup positioning/clickability, hover blocking)
+
+### Done
+- feat(chat): `LineWithActions` hover highlight — mouseover on German text shows yellow highlight (`rgba(250, 204, 21, 0.35)`) with popup (speak/copy/inject/practice buttons)
+- feat(chat): `splitAtArrow` — split line at "→" separator, highlight only German (primary) portion
+- feat(chat): `splitAtKorean` — split at first Korean/CJK character boundary, exclude Korean text (translations, annotations like "(존댓말)") from highlight
+- feat(chat): `extractSpeakerPrefix` — extract "A: ", "B: ", "Leo:" etc. from highlight area (both plain string and `<strong>B:</strong>` React element cases)
+- fix(chat): Speaker prefix not extracted when leading `"\n"` node exists — `extractSpeakerPrefix` now skips leading whitespace-only string nodes before checking for prefix pattern
+- feat(chat): `getNodeText` helper — recursively extract text content from any React node structure (handles array children in ReactMarkdown elements)
+- feat(chat): Popup positioned at mouse X + text line top (like PDF), with `translateY(-100%)` to appear above
+- feat(chat): `hoverHideTimer` 200ms delay — allows mouse to travel from text to popup without popup disappearing
+- fix(chat): Hover reactivates immediately after selection popup closes — changed from timer-based to `mouseLeave`-based `clearHoverBlock`
+- feat(chat): Hover events on `primaryRef` span only (not container div) — prevents Korean translation hover from triggering German highlight
+- feat(css): Yellow selection highlight (`::selection`) scoped to `.chat-messages` class only (not input fields or other UI)
+- feat(css): Unified yellow color across PDF and chat — hover `0.35`, selection `0.45`
+
+### Decisions
+- **mouseLeave-based hover block**: After selection popup closes, hover is blocked until mouse leaves the line entirely (matching PDF behavior). More reliable than timer-based approach
+- **`getNodeText` recursive extraction**: ReactMarkdown `<strong>` elements may have non-string children (arrays, nested elements). Recursive text extraction handles all cases vs. brittle `typeof children === "string"` check
+- **Leading whitespace skip in `extractSpeakerPrefix`**: ReactMarkdown inserts `"\n"` nodes as first children in multi-line paragraphs. Skipping these before prefix detection is necessary for correct extraction
+
+### Issues
+- **Node structure mismatch**: ReactMarkdown produces `["\n", "B: ", <strong>Ich komme aus Japan.</strong>, " → ..."]` — the leading `"\n"` caused `extractSpeakerPrefix` to check the wrong node. Discovered via temporary `console.log` debug logging of `Children.toArray` output
+
+### Next
+- [ ] Verify `extractSpeakerPrefix` fix works for all speaker prefix variations (A:, B:, Leo:, bold vs plain)
+- [ ] Remove debug `console.log` statements from `PdfViewer.tsx` (`[extract]`, `[columns]`, `[sentence]`)
+- [ ] Hover popup edge positioning — viewport top overflow fallback (display below instead of above)
+- [x] Add hover sentence validation filter (`isValidGermanSentence`) — blocks exercise labels, repeated fragments, MP3 markers (from previous Next via this session)
+
+---
+
 ## Session: 2026-03-06 23:28
 
 > **Context**: PronunciationModal 전체 로직 버그 수정 — 마이크 지속, 더블 카운팅, 고유명사 인식 실패

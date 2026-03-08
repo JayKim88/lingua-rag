@@ -136,21 +136,40 @@ async def chat_endpoint(
             )
 
             # RAG: embed user message → search similar chunks → inject context
-            # Disabled when RAG_ENABLED=False (default). Enable via env var.
+            # Two searches run in parallel:
+            #   1. Unit-scoped textbook search (top 2) — lesson-specific content
+            #   2. WORTLISTE vocabulary search (top 2, stricter threshold) — vocabulary reference
             rag_chunks: list[str] = []
             if settings.RAG_ENABLED:
                 try:
+                    import asyncio as _asyncio
                     embedding_svc = get_embedding_service()
                     query_vec = await embedding_svc.embed(body.message)
-                    results = await vector_repo.search(
-                        query_embedding=query_vec,
-                        textbook_id=textbook_id,
-                        unit_id=unit_id,
-                        limit=3,
+                    textbook_results, vocab_results = await _asyncio.gather(
+                        vector_repo.search(
+                            query_embedding=query_vec,
+                            textbook_id=textbook_id,
+                            unit_id=unit_id,
+                            limit=2,
+                        ),
+                        vector_repo.search_vocabulary(
+                            query_embedding=query_vec,
+                            textbook_id="wortliste-a1",
+                            limit=2,
+                        ),
+                        return_exceptions=True,
                     )
-                    rag_chunks = [r["content"] for r in results]
+                    if not isinstance(textbook_results, Exception):
+                        rag_chunks.extend(r["content"] for r in textbook_results)
+                    if not isinstance(vocab_results, Exception):
+                        rag_chunks.extend(r["content"] for r in vocab_results)
                     if rag_chunks:
-                        logger.info("RAG: found %d chunks for unit %s (distances logged at debug)", len(rag_chunks), unit_id)
+                        logger.info(
+                            "RAG: %d textbook + %d vocab chunks for unit %s",
+                            0 if isinstance(textbook_results, Exception) else len(textbook_results),
+                            0 if isinstance(vocab_results, Exception) else len(vocab_results),
+                            unit_id,
+                        )
                 except Exception as exc:
                     logger.warning("RAG search failed, using base prompt: %s", exc)
 

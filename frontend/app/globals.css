@@ -12,3 +12,19 @@
   user-select: text;
   -webkit-user-select: text;
 }
+
+/* Yellow selection highlight — only in chat messages and PDF */
+.chat-messages ::selection {
+  background: rgba(250, 204, 21, 0.45);
+}
+.chat-messages ::-moz-selection {
+  background: rgba(250, 204, 21, 0.45);
+}
+
+/* Hide native selection highlight in PDF — we use canvas-accurate overlays instead */
+.react-pdf__Page__textContent ::selection {
+  background: transparent;
+}
+.react-pdf__Page__textContent ::-moz-selection {
+  background: transparent;
+}

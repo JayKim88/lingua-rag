@@ -333,6 +333,10 @@ export default function ChatPanel({
                     speak,
                     onInject: (text) => setLocalInject({ text, id: Date.now() }),
                     onPractice: (text) => setPracticeText(text),
+                    selectionPopup: null,
+                    setSelectionPopup: () => {},
+                    hoverBlocked: false,
+                    clearHoverBlock: () => {},
                   }}
                 >
                   <div className="prose prose-sm max-w-none prose-headings:text-gray-800 prose-strong:text-gray-900 text-gray-800">

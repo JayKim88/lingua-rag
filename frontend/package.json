@@ -4,6 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev --turbo",
+    "dev:backend": "cd ../backend && .venv/bin/uvicorn app.main:app --reload --port 8000",
+    "dev:all": "concurrently --names \"BACK,FRONT\" --prefix-colors \"blue,green\" \"npm run dev:backend\" \"npm run dev\"",
     "build": "next build",
     "start": "next start",
     "lint": "next lint"
@@ -24,6 +26,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "autoprefixer": "^10.4.20",
+    "concurrently": "^9.2.1",
     "eslint": "^9",
     "eslint-config-next": "^15.5.12",
     "postcss": "^8.4.49",

@@ -366,3 +366,35 @@ class VectorSearchRepository:
                     limit,
                 )
         return [_record_to_dict(r) for r in records]
+
+    async def search_vocabulary(
+        self,
+        query_embedding: list[float],
+        textbook_id: str = "wortliste-a1",
+        limit: int = 2,
+        max_distance: float = 0.65,
+    ) -> list[dict[str, Any]]:
+        """
+        Search vocabulary-only textbooks (no unit filter).
+        Stricter max_distance (0.65) to avoid low-quality matches.
+        """
+        pool = get_pool()
+        embedding_str = f"[{','.join(map(str, query_embedding))}]"
+
+        async with pool.acquire() as conn:
+            records = await conn.fetch(
+                """
+                SELECT content, metadata,
+                       embedding <=> $1::vector AS distance
+                FROM document_chunks
+                WHERE textbook_id = $2
+                  AND embedding <=> $1::vector < $3
+                ORDER BY distance
+                LIMIT $4
+                """,
+                embedding_str,
+                textbook_id,
+                max_distance,
+                limit,
+            )
+        return [_record_to_dict(r) for r in records]
