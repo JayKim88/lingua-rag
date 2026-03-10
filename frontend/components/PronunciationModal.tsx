@@ -6,6 +6,7 @@ interface Props {
   text: string;
   speak: (t: string) => void;
   onClose: () => void;
+  lang?: string;
 }
 
 type Phase = "listening" | "done" | "complete";
@@ -48,7 +49,7 @@ function fuzzyMatch(a: string, b: string): boolean {
 // ---------------------------------------------------------------------------
 // PronunciationModal
 // ---------------------------------------------------------------------------
-export default function PronunciationModal({ text, speak, onClose }: Props) {
+export default function PronunciationModal({ text, speak, onClose, lang = "de-DE" }: Props) {
   const origWords = useMemo(() => normalize(text), [text]);
 
   const [phase, setPhase] = useState<Phase>("listening");
@@ -88,7 +89,7 @@ export default function PronunciationModal({ text, speak, onClose }: Props) {
     const Rec = (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const rec: any = new Rec();
-    rec.lang = "de-DE";
+    rec.lang = lang;
     rec.interimResults = true;
     rec.continuous = false;
     rec.maxAlternatives = 1;

@@ -4,7 +4,6 @@ import {
   useState,
   useRef,
   useEffect,
-  useContext,
   createContext,
   Children,
   isValidElement,
@@ -22,10 +21,6 @@ export const ChatActionsCtx = createContext<{
   speak: (text: string) => void;
   onInject: (text: string) => void;
   onPractice: (text: string) => void;
-  selectionPopup: { x: number; y: number; text: string } | null;
-  setSelectionPopup: (p: { x: number; y: number; text: string } | null) => void;
-  hoverBlocked: boolean;
-  clearHoverBlock: () => void;
 } | null>(null);
 
 // ---------------------------------------------------------------------------
@@ -202,226 +197,27 @@ function extractSpeakerPrefix(nodes: React.ReactNode[]): {
 // primaryRef captures the German text; buttons operate only on that text.
 // ---------------------------------------------------------------------------
 function LineWithActions({ children }: { children: React.ReactNode }) {
-  const ctx = useContext(ChatActionsCtx);
-  const [hovered, setHovered] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const [hasGerman, setHasGerman] = useState(false);
-  const [popupPos, setPopupPos] = useState<{ x: number; y: number } | null>(null);
-  const primaryRef = useRef<HTMLSpanElement>(null);
-  const hoverHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   const nodesArray = Children.toArray(children);
 
-
   const { primary, secondary } = splitAtArrow(nodesArray);
-
-  // Only treat as split when there is actual content before "→"
   const hasSplit = secondary !== null && primary.length > 0;
 
-  // Always split at Korean boundary — works for both arrow-split and non-split lines
   const baseNodes = hasSplit ? primary : nodesArray;
   const koreanSplit = splitAtKorean(baseNodes);
   const hasKoreanTail =
     koreanSplit.rest !== null && koreanSplit.latin.length > 0;
 
-  // Use Korean-filtered latin part if available, otherwise use base nodes
   const contentNodes = hasKoreanTail ? koreanSplit.latin : baseNodes;
   const { prefix: speakerPrefix, nodes: highlightNodes } =
     extractSpeakerPrefix(contentNodes);
 
-  // Check if line contains German (Latin) text — from DOM after mount
-  useEffect(() => {
-    const text = primaryRef.current?.textContent ?? "";
-    setHasGerman(/[a-zA-ZÀ-ÖØ-öø-ÿ]/.test(text));
-  }, [children]);
-
-  const getText = () => {
-    const el = primaryRef.current;
-    if (!el) return "";
-    const raw = el.textContent?.trim() ?? "";
-    // Strip speaker prefix: "A: ", "Leo: " etc.
-    const base = raw.replace(/^[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ]*:\s*/, "").trim() || raw;
-
-    // If no Korean in the text, return as-is
-    const KOREAN_RE = /[\u1100-\uD7FF\u4E00-\u9FFF\u3040-\u30FF]/;
-    if (!KOREAN_RE.test(base)) return base;
-
-    // Mixed Korean+German: prefer bold/em elements that contain Latin text
-    const STRIP_KOREAN = (t: string) =>
-      t
-        .replace(/[\u1100-\uD7FF\u4E00-\u9FFF\u3040-\u30FF]+/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-    const boldEls = Array.from(el.querySelectorAll("strong, em"));
-    const germanBold = boldEls
-      .map((b) => {
-        const t = b.textContent?.trim() ?? "";
-        return KOREAN_RE.test(t) ? STRIP_KOREAN(t) : t;
-      })
-      .filter((t) => /[a-zA-ZÀ-ÖØ-öø-ÿ]/.test(t))
-      .join(" ")
-      .trim();
-    if (germanBold) return germanBold;
-
-    // Fallback: extract Latin word sequences (German words in Korean-medium text)
-    const latinWords = base.match(/[a-zA-ZÀ-ÖØ-öø-ÿ]+/g) ?? [];
-    return latinWords.join(" ");
-  };
-
-  const handleCopy = () => {
-    const text = getText();
-    navigator.clipboard.writeText(text).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
-  };
-
-  // Hover only on German lines, suppressed when selection popup is active or hover is blocked
-  const blocked = !!ctx?.selectionPopup || !!ctx?.hoverBlocked;
-  const showHoverHighlight = hasGerman && hovered && !blocked;
-  const showButtons = hasGerman && hovered && !blocked;
-
   return (
     <div className="mb-0.5 last:mb-0">
-      {/* Speaker prefix (not highlighted, no hover) */}
       {speakerPrefix && <span>{speakerPrefix}</span>}
-      {/* Primary text (German sentence) — hover & highlight only this span */}
-      <span
-        ref={primaryRef}
-        className="rounded transition-colors"
-        style={{
-          paddingLeft: 2,
-          paddingRight: 2,
-          backgroundColor: showHoverHighlight ? "rgba(250, 204, 21, 0.35)" : undefined,
-        }}
-        onMouseEnter={(e) => {
-          if (hoverHideTimer.current) clearTimeout(hoverHideTimer.current);
-          setHovered(true);
-          const rect = primaryRef.current?.getBoundingClientRect();
-          setPopupPos({ x: e.clientX, y: rect?.top ?? e.clientY });
-        }}
-        onMouseLeave={() => {
-          // Delay hide so mouse can reach the popup
-          hoverHideTimer.current = setTimeout(() => {
-            setHovered(false);
-            setPopupPos(null);
-            if (ctx?.hoverBlocked) ctx.clearHoverBlock();
-          }, 200);
-        }}
-      >
-        {highlightNodes}
-      </span>
-
-      {/* Hover popup — positioned like PDF: above mouse, clamped to viewport */}
-      {showButtons && popupPos && (
-        <div
-          className="fixed z-50 flex items-center gap-0.5 bg-white border border-gray-100 rounded-lg shadow-sm px-1.5 py-0.5"
-          style={{
-            left: Math.min(popupPos.x - 4, window.innerWidth - 120),
-            top: popupPos.y - 4,
-            transform: "translateY(-100%)",
-          }}
-          onMouseEnter={() => {
-            if (hoverHideTimer.current) clearTimeout(hoverHideTimer.current);
-            setHovered(true);
-          }}
-          onMouseLeave={() => {
-            hoverHideTimer.current = setTimeout(() => {
-              setHovered(false);
-              setPopupPos(null);
-              if (ctx?.hoverBlocked) ctx.clearHoverBlock();
-            }, 200);
-          }}
-        >
-          {/* TTS */}
-          <button
-            onClick={() => ctx?.speak(getText())}
-            title="발음 듣기"
-            className="p-0.5 rounded text-gray-400 hover:text-blue-600 transition-colors"
-          >
-            <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 24 24">
-              <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z" />
-            </svg>
-          </button>
-
-          {/* Copy */}
-          <button
-            onClick={handleCopy}
-            title="복사"
-            className="p-0.5 rounded text-gray-400 hover:text-gray-600 transition-colors"
-          >
-            {copied ? (
-              <span className="text-[9px] font-medium text-green-600">
-                복사됨
-              </span>
-            ) : (
-              <svg
-                className="w-3 h-3"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-              </svg>
-            )}
-          </button>
-
-          {/* Inject to input */}
-          <button
-            onClick={() => ctx?.onInject(getText())}
-            title="입력창에 사용"
-            className="p-0.5 rounded text-gray-400 hover:text-gray-600 transition-colors"
-          >
-            <svg
-              className="w-3 h-3"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M11 19H6a2 2 0 01-2-2V7a2 2 0 012-2h11a2 2 0 012 2v6"
-              />
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M15 19l3 3m0 0l3-3m-3 3v-6"
-              />
-            </svg>
-          </button>
-
-          {/* Pronunciation practice */}
-          <button
-            onClick={() => ctx?.onPractice(getText())}
-            title="발음 연습"
-            className="p-0.5 rounded text-gray-400 hover:text-purple-600 transition-colors"
-          >
-            <svg
-              className="w-3 h-3"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"
-              />
-            </svg>
-          </button>
-        </div>
-      )}
-
-      {/* Korean annotation tail (e.g., "(존댓말)" after German) */}
+      <span>{highlightNodes}</span>
       {hasKoreanTail && (
         <span className="text-gray-500">{koreanSplit.rest}</span>
       )}
-      {/* Arrow-split translation (→ Korean) */}
       {hasSplit && <span className="text-gray-500">{secondary}</span>}
     </div>
   );
@@ -696,22 +492,8 @@ export default function MessageList({
     y: number;
     text: string;
   } | null>(null);
-  const [hoverBlocked, setHoverBlocked] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   let lastDateKey = "";
-
-  const blockHoverRef = useRef(() => setHoverBlocked(true));
-  blockHoverRef.current = () => setHoverBlocked(true);
-
-  const clearHoverBlock = () => setHoverBlocked(false);
-
-  // Wrap setSelectionPopup to block hover until mouse leaves the line
-  const handleSetSelectionPopup = (
-    p: { x: number; y: number; text: string } | null,
-  ) => {
-    setSelectionPopup(p);
-    if (p === null) setHoverBlocked(true);
-  };
 
   // Selection detection: drag / dblclick → show floating popup
   useEffect(() => {
@@ -722,11 +504,10 @@ export default function MessageList({
       const sel = window.getSelection();
       if (!sel || sel.isCollapsed) return;
       const text = sel.toString().trim();
-      if (!text || !/[a-zA-ZÀ-ÖØ-öø-ÿ]/.test(text)) return;
+      if (!text) return;
       try {
         const range = sel.getRangeAt(0);
         if (!container.contains(range.commonAncestorContainer)) return;
-        // Position above mouse cursor (like PDF)
         setSelectionPopup({ x: mx, y: my, text });
       } catch {
         /* ignore */
@@ -746,11 +527,7 @@ export default function MessageList({
     const handleMouseDown = (e: MouseEvent) => {
       const popup = document.getElementById("chat-sel-popup");
       if (popup?.contains(e.target as Node)) return;
-      // Use setState updater to check if popup was open before clearing
-      setSelectionPopup((prev) => {
-        if (prev !== null) blockHoverRef.current();
-        return null;
-      });
+      setSelectionPopup(null);
     };
 
     container.addEventListener("mouseup", handleMouseUp);
@@ -764,34 +541,22 @@ export default function MessageList({
   }, []);
 
   return (
-    <ChatActionsCtx.Provider
-      value={{
-        speak,
-        onInject,
-        onPractice,
-        selectionPopup,
-        setSelectionPopup: handleSetSelectionPopup,
-        hoverBlocked,
-        clearHoverBlock,
-      }}
-    >
-      {/* Selection popup — same style as hover action buttons */}
+    <ChatActionsCtx.Provider value={{ speak, onInject, onPractice }}>
+      {/* Selection popup — compact icon-only style */}
       {selectionPopup && (
         <div
           id="chat-sel-popup"
           className="fixed z-50 flex items-center gap-0.5 bg-white border border-gray-100 rounded-lg shadow-sm px-1.5 py-0.5"
           style={{
-            left: selectionPopup.x,
-            top: selectionPopup.y - 8,
+            left: Math.min(selectionPopup.x, window.innerWidth - 120),
+            top: selectionPopup.y - 12,
             transform: "translateX(-50%) translateY(-100%)",
           }}
         >
           {/* TTS */}
           <button
-            onClick={() => {
-              speak(selectionPopup.text);
-              handleSetSelectionPopup(null);
-            }}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => { speak(selectionPopup.text); setSelectionPopup(null); window.getSelection()?.removeAllRanges(); }}
             title="발음 듣기"
             className="p-0.5 rounded text-gray-400 hover:text-blue-600 transition-colors"
           >
@@ -799,32 +564,39 @@ export default function MessageList({
               <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z" />
             </svg>
           </button>
-          {/* Inject to input (질문하기) */}
+          {/* Copy */}
           <button
-            onClick={() => {
-              onInject(selectionPopup.text);
-              handleSetSelectionPopup(null);
-            }}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => { navigator.clipboard.writeText(selectionPopup.text); setSelectionPopup(null); window.getSelection()?.removeAllRanges(); }}
+            title="복사"
+            className="p-0.5 rounded text-gray-400 hover:text-gray-600 transition-colors"
+          >
+            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+            </svg>
+          </button>
+          {/* Inject to input */}
+          <button
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => { onInject(selectionPopup.text); setSelectionPopup(null); window.getSelection()?.removeAllRanges(); }}
             title="입력창에 사용"
             className="p-0.5 rounded text-gray-400 hover:text-gray-600 transition-colors"
           >
-            <svg
-              className="w-3 h-3"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M11 19H6a2 2 0 01-2-2V7a2 2 0 012-2h11a2 2 0 012 2v6"
-              />
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M15 19l3 3m0 0l3-3m-3 3v-6"
-              />
+            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M11 19H6a2 2 0 01-2-2V7a2 2 0 012-2h11a2 2 0 012 2v6" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l3 3m0 0l3-3m-3 3v-6" />
+            </svg>
+          </button>
+          {/* Practice */}
+          <button
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => { onPractice(selectionPopup.text); setSelectionPopup(null); window.getSelection()?.removeAllRanges(); }}
+            title="발음 연습"
+            className="p-0.5 rounded text-gray-400 hover:text-purple-600 transition-colors"
+          >
+            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
             </svg>
           </button>
         </div>

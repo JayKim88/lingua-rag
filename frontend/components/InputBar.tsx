@@ -91,9 +91,9 @@ export default function InputBar({
                   d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
                 />
               </svg>
-              페이지 컨텍스트 활성
+              PDF 연결됨
               <span className="pointer-events-none absolute bottom-full left-0 mb-1.5 w-56 rounded-lg bg-gray-800 px-2.5 py-1.5 text-xs text-white opacity-0 transition-opacity group-hover/ctx:opacity-100 z-50">
-                현재 PDF 페이지 이미지가 AI에게 함께 전달됩니다. AI가 교재 내용을 직접 보며 답변할 수 있습니다.
+                &ldquo;이 페이지&rdquo;를 포함하여 질문하면 현재 PDF 페이지 텍스트가 AI에게 함께 전달됩니다.
               </span>
             </span>
           )}

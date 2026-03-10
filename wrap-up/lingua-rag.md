@@ -4,6 +4,44 @@
 > **Scope**: Full stack (backend + frontend + infra)
 > **Live**: https://lingua-rag.vercel.app
 
+## Session: 2026-03-10 22:54
+
+> **Context**: PDF viewer UX fixes (scroll animation, floating toolbar) + page image → "이 페이지" trigger-based text extraction refactor
+
+### Done
+- fix(pdf): Remove smooth scroll animation — `scrollIntoView({ behavior: "smooth" })` → `"instant"` + `ignoreScrollRef` timeout reduced to 100ms
+- fix(pdf): Fix bottom toolbar scrolling away — restructured DOM: `relative` on outer container, removed `relative` from scroll div, moved toolbar + search panel JSX outside the scrollable `div` (sibling of scrollRef, child of containerRef)
+- feat(pdf): `PdfViewerHandle` interface + `forwardRef` — expose `getPageText()` (pdfjs `getTextContent()`) and `hasFile()` via imperative ref; parent can extract page text client-side on demand
+- refactor(pdf): Remove auto canvas image capture — deleted `onRenderSuccess` → `canvas.toDataURL` → `onPageImageChange` block; replaced with lightweight `onPageChange?.(pageNumber)` callback
+- refactor(pdf): `onPageImageChange` prop → `onPageChange` prop (client-side, page number only; no base64 data)
+- feat(backend): `GET /api/pdfs/{pdf_id}/page/{page_num}/text` — PyMuPDF `get_text()` endpoint in `pdfs.py`
+- feat(backend): Register pdfs router in `main.py` (`app.include_router(pdfs.router, ...)`)
+- feat(backend): `page_text: Optional[str]` field added to `ChatRequest` schema
+- feat(backend): `_build_messages` updated — `page_text` injects `[현재 PDF 페이지 내용]\n{text}` prefix before user message (text path, not image path)
+- feat(backend): `chat.py` — pass `page_text=body.page_text` to `claude_svc.stream()`
+- feat(frontend): `GET /api/pdfs/[id]/page/[pageNum]/text/route.ts` — Next.js proxy route (auth-forwarded)
+- feat(chat): `useChat` — detect `"이 페이지"` regex trigger in user message → call `getPageText()` callback → send as `page_text` in POST body
+- refactor(chat): Replace `pageImage` prop chain with `getPageText` callback (page.tsx → ChatPanel → useChat)
+- feat(ux): InputBar context indicator — "페이지 컨텍스트 활성" → "PDF 연결됨" + updated tooltip explaining the trigger
+
+### Decisions
+- **Client-side text extraction over server-side**: PdfViewer already has pdfjs doc loaded in memory via `pdfDocRef`. Using `getTextContent()` client-side avoids server round-trip and doesn't require the server-stored PDF (current architecture uses IndexedDB/local storage). Server endpoint (`/pdfs/{id}/text`) is ready for when server-stored PDFs are needed.
+- **Trigger-based injection over auto-send**: Sending page image on every page turn was expensive (vision tokens per render). Trigger on `"이 페이지"` is zero-cost until the user explicitly references the page, and text extraction is cheaper than image tokens.
+- **`forwardRef` for imperative text access**: Parent (page.tsx) needs to call `getPageText()` imperiously without owning the pdfjs state. `forwardRef` + `useImperativeHandle` is the correct React pattern here over lifting pdfjs state up.
+
+### Issues
+- **Edit tool permission rejections (multiple)**: VSCode extension kept prompting for permission; required user approval each time. Caused re-reads between attempts due to cache expiration.
+
+### Next
+- [ ] Fix hover useEffect dependency: `[]` → `[file]` so listener attaches after PDF loads
+- [ ] Fix double-click word selection — `handleDblClick` with `findCaretAt` + `wordBoundaries`
+- [ ] Test "이 페이지" trigger end-to-end — open a PDF, ask "이 페이지에 있는 단어 설명해줘", verify `page_text` logged in backend
+- [ ] Remove debug `console.log` from `PdfViewer.tsx` (`[extract]`, `[columns]`, `[sentence]`)
+- [ ] Hover popup edge positioning — viewport top overflow fallback
+- [ ] Consider migrating to `@react-pdf-viewer/core` for better scaleX transform handling
+
+---
+
 ## Session: 2026-03-08 22:54
 
 > **Context**: PDF drag/selection bug investigation + WORTLISTE-A1 RAG indexing + hover sentence validation filter

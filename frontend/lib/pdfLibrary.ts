@@ -8,7 +8,7 @@ export const LIBRARY_META_KEY = "lingua-pdf-library";
 export const LIBRARY_CURRENT_KEY = "lingua-pdf-current";
 export const LIBRARY_MAX = 10;
 
-export interface PdfMeta { name: string; size: number; lastOpened: string }
+export interface PdfMeta { name: string; size: number; lastOpened: string; addedAt: number; serverId?: string }
 
 // ---------------------------------------------------------------------------
 // IndexedDB helpers
@@ -65,18 +65,45 @@ export async function deletePdfFromLibrary(name: string): Promise<void> {
 // localStorage metadata helpers
 // ---------------------------------------------------------------------------
 export function getLibraryMeta(): PdfMeta[] {
-  try { return JSON.parse(localStorage.getItem(LIBRARY_META_KEY) ?? "[]"); }
-  catch { return []; }
+  try {
+    const raw: Array<{ name: string; size: number; lastOpened: string; addedAt?: number }> =
+      JSON.parse(localStorage.getItem(LIBRARY_META_KEY) ?? "[]");
+    // Backfill addedAt for entries saved before this field was added
+    return raw.map((m, i) => ({
+      name: m.name,
+      size: m.size,
+      lastOpened: m.lastOpened,
+      addedAt: m.addedAt ?? new Date(m.lastOpened).getTime() - i,
+    }));
+  } catch { return []; }
 }
 
 export function upsertLibraryMeta(file: File): PdfMeta[] {
-  const list = getLibraryMeta().filter((m) => m.name !== file.name);
-  const updated = [
-    { name: file.name, size: file.size, lastOpened: new Date().toISOString() },
-    ...list,
-  ].slice(0, LIBRARY_MAX);
+  const now = new Date().toISOString();
+  const list = getLibraryMeta();
+  const existing = list.find((m) => m.name === file.name);
+  let updated: PdfMeta[];
+  if (existing) {
+    // Update lastOpened in-place; preserve insertion order, addedAt, and serverId
+    updated = list.map((m) =>
+      m.name === file.name ? { ...m, size: file.size, lastOpened: now } : m,
+    );
+  } else {
+    // Append new entry at end to preserve registration order
+    updated = [
+      ...list,
+      { name: file.name, size: file.size, lastOpened: now, addedAt: Date.now() },
+    ].slice(0, LIBRARY_MAX);
+  }
   localStorage.setItem(LIBRARY_META_KEY, JSON.stringify(updated));
   return updated;
+}
+
+export function setLibraryMetaServerId(name: string, serverId: string): void {
+  const updated = getLibraryMeta().map((m) =>
+    m.name === name ? { ...m, serverId } : m,
+  );
+  localStorage.setItem(LIBRARY_META_KEY, JSON.stringify(updated));
 }
 
 export function removeLibraryMeta(name: string): PdfMeta[] {

@@ -45,6 +45,7 @@ class ClaudeService:
         textbook_id: str,
         rag_chunks: list[str] | None = None,
         page_image: str | None = None,
+        page_text: str | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
         Stream Claude's response as SSE-compatible events.
@@ -92,7 +93,7 @@ class ClaudeService:
         ]
 
         # Build message list for Claude (history + current user message)
-        messages = _build_messages(history, user_message, page_image=page_image)
+        messages = _build_messages(history, user_message, page_image=page_image, page_text=page_text)
 
         last_error: Exception | None = None
         for attempt in range(MAX_RETRIES):
@@ -175,6 +176,7 @@ def _build_messages(
     history: list[dict[str, Any]],
     user_message: str,
     page_image: str | None = None,
+    page_text: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     Build the messages array for the Claude API call.
@@ -182,6 +184,8 @@ def _build_messages(
     Combines conversation history (already limited to last 10) with
     the current user message.  When page_image is provided the user
     turn becomes a multimodal content block (image + text).
+    When page_text is provided it is prepended to the user message
+    as context (much cheaper than vision tokens).
 
     Anthropic requires messages to alternate user/assistant and
     the array must start with a user message.
@@ -203,6 +207,8 @@ def _build_messages(
             },
             {"type": "text", "text": user_message},
         ]
+    elif page_text:
+        content = f"[현재 PDF 페이지 내용]\n{page_text}\n\n{user_message}"
     else:
         content = user_message
 

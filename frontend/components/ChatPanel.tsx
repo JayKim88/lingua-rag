@@ -23,8 +23,10 @@ interface ChatPanelProps {
   level: "A1" | "A2";
   textbookId: string;
   injectText?: { text: string; id: number };
-  pageImage?: string | null;
+  getPageText?: () => Promise<string | null>;
+  hasPdfContext?: boolean;
   speak: (text: string) => void;
+  onSaveToPage?: (content: string) => void;
 }
 
 export default function ChatPanel({
@@ -32,11 +34,13 @@ export default function ChatPanel({
   level,
   textbookId,
   injectText,
-  pageImage,
+  getPageText,
+  hasPdfContext,
   speak,
+  onSaveToPage,
 }: ChatPanelProps) {
   const { messages, isStreaming, isLoadingHistory, queueSize, sendMessage, sendSummary, cancelMessage, updateFeedback } =
-    useChat({ unitId, level, textbookId, pageImage });
+    useChat({ unitId, level, textbookId, getPageText });
 
   const unitTitle = UNITS.find((u) => u.id === unitId)?.title ?? unitId;
 
@@ -73,11 +77,12 @@ export default function ChatPanel({
       try {
         await saveSummary({ unitId, unitTitle, content });
         await reloadSummaries();
+        onSaveToPage?.(content);
       } catch {
         // optimistic UI feedback already shown in SaveSummaryButton
       }
     },
-    [unitId, unitTitle, reloadSummaries]
+    [unitId, unitTitle, reloadSummaries, onSaveToPage]
   );
 
   const handleDeleteSummary = useCallback(
@@ -146,10 +151,11 @@ export default function ChatPanel({
       await saveNote({ unitId, unitTitle, content: trimmed });
       await reloadNotes();
       setShowMemoModal(false);
+      onSaveToPage?.(trimmed);
     } finally {
       setIsSavingMemo(false);
     }
-  }, [memoContent, unitId, unitTitle, reloadNotes]);
+  }, [memoContent, unitId, unitTitle, reloadNotes, onSaveToPage]);
 
   // ---------------------------------------------------------------------------
   // Close overlay / send
@@ -333,10 +339,6 @@ export default function ChatPanel({
                     speak,
                     onInject: (text) => setLocalInject({ text, id: Date.now() }),
                     onPractice: (text) => setPracticeText(text),
-                    selectionPopup: null,
-                    setSelectionPopup: () => {},
-                    hoverBlocked: false,
-                    clearHoverBlock: () => {},
                   }}
                 >
                   <div className="prose prose-sm max-w-none prose-headings:text-gray-800 prose-strong:text-gray-900 text-gray-800">
@@ -524,7 +526,7 @@ export default function ChatPanel({
         isStreaming={isStreaming || isLoadingHistory}
         queueSize={queueSize}
         injectText={mergedInjectText}
-        hasPageContext={!!pageImage}
+        hasPageContext={!!hasPdfContext}
         onSummary={sendSummary}
         onMemo={handleOpenMemo}
         showSummary={showNotes}

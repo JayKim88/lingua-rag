@@ -7,10 +7,12 @@ interface UseChatOptions {
   unitId: string;
   level: "A1" | "A2";
   textbookId: string;
-  pageImage?: string | null;
+  getPageText?: () => Promise<string | null>;
 }
 
-export function useChat({ unitId, level, textbookId, pageImage }: UseChatOptions) {
+const PAGE_TRIGGER = /이\s*페이지/;
+
+export function useChat({ unitId, level, textbookId, getPageText }: UseChatOptions) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
@@ -120,6 +122,16 @@ export function useChat({ unitId, level, textbookId, pageImage }: UseChatOptions
       const controller = new AbortController();
       abortControllerRef.current = controller;
 
+      // Detect "이 페이지" trigger → extract page text client-side
+      let pageText: string | null = null;
+      if (PAGE_TRIGGER.test(content) && getPageText) {
+        try {
+          pageText = await getPageText();
+        } catch {
+          // Silently fail — send message without page context
+        }
+      }
+
       try {
         const response = await fetch("/api/chat", {
           method: "POST",
@@ -129,7 +141,7 @@ export function useChat({ unitId, level, textbookId, pageImage }: UseChatOptions
             unit_id: unitId,
             level,
             textbook_id: textbookId,
-            ...(pageImage ? { page_image: pageImage } : {}),
+            ...(pageText ? { page_text: pageText } : {}),
           }),
           signal: controller.signal,
         });
@@ -258,7 +270,7 @@ export function useChat({ unitId, level, textbookId, pageImage }: UseChatOptions
         }
       }
     },
-    [unitId, level, textbookId, pageImage]
+    [unitId, level, textbookId, getPageText]
   );
 
   const sendMessage = useCallback(

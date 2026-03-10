@@ -308,6 +308,60 @@ class NoteRepository:
         return result != "DELETE 0"
 
 
+class AnnotationRepository:
+    """CRUD operations for pdf_annotations table."""
+
+    async def list_by_page(self, user_id: UUID, pdf_id: str, page_num: int) -> list[dict]:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            records = await conn.fetch(
+                """
+                SELECT * FROM pdf_annotations
+                WHERE user_id = $1 AND pdf_id = $2 AND page_num = $3
+                ORDER BY created_at ASC
+                """,
+                user_id, pdf_id, page_num,
+            )
+        return [_record_to_dict(r) for r in records]
+
+    async def create(self, user_id: UUID, pdf_id: str, page_num: int,
+                     x_pct: float, y_pct: float, text: str, color: str) -> dict:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            record = await conn.fetchrow(
+                """
+                INSERT INTO pdf_annotations
+                  (id, user_id, pdf_id, page_num, x_pct, y_pct, text, color, created_at)
+                VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, NOW())
+                RETURNING *
+                """,
+                user_id, pdf_id, page_num, x_pct, y_pct, text, color,
+            )
+        return _record_to_dict(record)
+
+    async def update(self, user_id: UUID, ann_id: UUID, text: str, color: str) -> dict | None:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            record = await conn.fetchrow(
+                """
+                UPDATE pdf_annotations SET text = $1, color = $2
+                WHERE id = $3 AND user_id = $4
+                RETURNING *
+                """,
+                text, color, ann_id, user_id,
+            )
+        return _record_to_dict(record) if record else None
+
+    async def delete(self, user_id: UUID, ann_id: UUID) -> bool:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM pdf_annotations WHERE id = $1 AND user_id = $2",
+                ann_id, user_id,
+            )
+        return result != "DELETE 0"
+
+
 class VectorSearchRepository:
     """pgvector similarity search for RAG (v0.2)."""
 

@@ -1,7 +1,15 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import {
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+  useImperativeHandle,
+  forwardRef,
+} from "react";
 import PronunciationModal from "./PronunciationModal";
+import { TTS_LANGUAGES } from "@/hooks/useTTS";
 import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/TextLayer.css";
 import "react-pdf/dist/Page/AnnotationLayer.css";
@@ -12,9 +20,17 @@ import {
   getLibraryMeta,
   upsertLibraryMeta,
   removeLibraryMeta,
+  setLibraryMetaServerId,
   LIBRARY_CURRENT_KEY,
   type PdfMeta,
 } from "@/lib/pdfLibrary";
+import {
+  fetchAnnotations,
+  createAnnotation,
+  updateAnnotation,
+  deleteAnnotation,
+  type Annotation,
+} from "@/lib/annotations";
 
 export type { PdfMeta };
 
@@ -238,31 +254,49 @@ interface HoverPopup {
   text: string;
 }
 
+export interface PdfViewerHandle {
+  getPageText: () => Promise<string | null>;
+  hasFile: () => boolean;
+}
+
 interface PdfViewerProps {
   onTextSelect: (payload: { text: string; id: number }) => void;
-  onPageImageChange: (base64: string | null) => void;
+  onPageChange?: (pageNumber: number) => void;
   speak: (text: string) => void;
+  language: string | null;
+  onLanguageChange: (lang: string) => void;
   openFile?: File | null; // external file to open (set by parent modal)
   onClose?: () => void; // called when the viewer's close button is clicked
 }
 
-export default function PdfViewer({
-  onTextSelect,
-  onPageImageChange,
-  speak,
-  openFile,
-  onClose,
-}: PdfViewerProps) {
+function PdfViewerInner(
+  { onTextSelect, onPageChange, speak, language, onLanguageChange, openFile, onClose }: PdfViewerProps,
+  ref: React.ForwardedRef<PdfViewerHandle>,
+) {
   const [file, setFile] = useState<File | null>(null);
   const [numPages, setNumPages] = useState<number>(0);
   const [pageNumber, setPageNumber] = useState<number>(1);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [popup, setPopup] = useState<SelectionPopup | null>(null);
+  const [popupTranslation, setPopupTranslation] = useState<string | null>(null);
+  const [isTranslating, setIsTranslating] = useState(false);
   const [hoverPopup, setHoverPopup] = useState<HoverPopup | null>(null);
   const [practicePdfText, setPracticePdfText] = useState<string | null>(null);
+  const [showLangModal, setShowLangModal] = useState(false);
   const [isRestoring, setIsRestoring] = useState(true);
-  const [library, setLibrary] = useState<PdfMeta[]>([]);
   const [pageInputStr, setPageInputStr] = useState<string | null>(null);
+  const [scale, setScale] = useState(1.0);
+
+  // Server-side PDF ID (for annotations)
+  const [serverId, setServerId] = useState<string | null>(null);
+
+  // Annotation state
+  const [isNoteMode, setIsNoteMode] = useState(false);
+  const [annotations, setAnnotations] = useState<Annotation[]>([]);
+  const [pendingNote, setPendingNote] = useState<{ xPct: number; yPct: number } | null>(null);
+  const [editingAnnot, setEditingAnnot] = useState<Annotation | null>(null);
+  const [noteText, setNoteText] = useState("");
+  const [noteColor, setNoteColor] = useState("yellow");
 
   // TOC state
   const [toc, setToc] = useState<TocItem[]>([]);
@@ -295,6 +329,36 @@ export default function PdfViewer({
   const hoverBlockOriginRef = useRef<{ x: number; y: number } | null>(null);
   const HOVER_BLOCK_DIST = 50;
 
+  // Expose imperative handle for parent to extract page text client-side
+  useImperativeHandle(
+    ref,
+    () => ({
+      getPageText: async () => {
+        const doc = pdfDocRef.current;
+        if (!doc) return null;
+        try {
+          const page = await doc.getPage(pageNumber);
+          const content = await page.getTextContent();
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return content.items.map((item: any) => item.str).join(" ");
+        } catch {
+          return null;
+        }
+      },
+      hasFile: () => !!file,
+      getPdfId: () => serverId,
+    }),
+    [pageNumber, file, serverId],
+  );
+
+  // Load annotations when serverId or page changes
+  useEffect(() => {
+    if (!serverId) { setAnnotations([]); return; }
+    fetchAnnotations(serverId, pageNumber)
+      .then(setAnnotations)
+      .catch(() => setAnnotations([]));
+  }, [serverId, pageNumber]);
+
   // Sentence hover highlight using PDF-native coordinates from getTextContent().
   // The text layer spans are misaligned with the canvas due to font metric
   // approximation in PDF.js. Instead, we use the exact PDF coordinates
@@ -323,14 +387,15 @@ export default function PdfViewer({
     if (openFile) handleFileChange(openFile);
   }, [openFile]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Restore library metadata + last-opened PDF on mount
+  // Restore last-opened PDF on mount (+ restore serverId from meta)
   useEffect(() => {
-    setLibrary(getLibraryMeta());
     const currentName = localStorage.getItem(LIBRARY_CURRENT_KEY);
     if (!currentName) {
       setIsRestoring(false);
       return;
     }
+    const meta = getLibraryMeta().find((m) => m.name === currentName);
+    if (meta?.serverId) setServerId(meta.serverId);
     loadPdfFromLibrary(currentName).then((saved) => {
       if (saved) setFile(saved);
       setIsRestoring(false);
@@ -1323,6 +1388,7 @@ export default function PdfViewer({
           const rects = await computeRangeRects(range, textLayer);
           setSelectionRects(rects);
           setPopup({ x: e.clientX, y: e.clientY, text });
+          setPopupTranslation(null);
         } catch {
           setPopup(null);
         }
@@ -1348,6 +1414,7 @@ export default function PdfViewer({
           const rects = await computeRangeRects(range, textLayer);
           setSelectionRects(rects);
           setPopup({ x: e.clientX, y: e.clientY, text });
+          setPopupTranslation(null);
         } catch {
           /* ignore */
         }
@@ -1366,29 +1433,45 @@ export default function PdfViewer({
     };
   }, [computeRangeRects]);
 
-  const handleFileChange = useCallback(
-    (f: File) => {
-      if (f.type !== "application/pdf") return;
-      setFile(f);
-      setNumPages(0);
-      setPopup(null);
-      setShowSearch(false);
-      setSearchQuery("");
-      setSearchResults([]);
-      setToc([]);
-      setTocIsGenerated(false);
-      setShowToc(false);
-      pdfDocRef.current = null;
-      onPageImageChange(null);
-      const updated = upsertLibraryMeta(f);
-      setLibrary(updated);
-      localStorage.setItem(LIBRARY_CURRENT_KEY, f.name);
-      savePdfToLibrary(f).catch(() => {
-        /* ignore IDB errors */
-      });
-    },
-    [onPageImageChange],
-  );
+  const handleFileChange = useCallback((f: File) => {
+    if (f.type !== "application/pdf") return;
+    setFile(f);
+    setNumPages(0);
+    setPopup(null);
+    setShowSearch(false);
+    setSearchQuery("");
+    setSearchResults([]);
+    setToc([]);
+    setTocIsGenerated(false);
+    setShowToc(false);
+    setAnnotations([]);
+    setIsNoteMode(false);
+    setPendingNote(null);
+    setEditingAnnot(null);
+    pdfDocRef.current = null;
+
+    const meta = upsertLibraryMeta(f);
+    const existing = meta.find((m) => m.name === f.name);
+    const existingServerId = existing?.serverId ?? null;
+    setServerId(existingServerId);
+    localStorage.setItem(LIBRARY_CURRENT_KEY, f.name);
+    savePdfToLibrary(f).catch(() => { /* ignore IDB errors */ });
+
+    // Upload to server in background if not already done
+    if (!existingServerId) {
+      const formData = new FormData();
+      formData.append("file", f);
+      fetch("/api/pdfs", { method: "POST", body: formData })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (data?.id) {
+            setServerId(data.id);
+            setLibraryMetaServerId(f.name, data.id);
+          }
+        })
+        .catch(() => { /* ignore upload errors */ });
+    }
+  }, []);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
@@ -1412,54 +1495,9 @@ export default function PdfViewer({
     setTocIsGenerated(false);
     setShowToc(false);
     pdfDocRef.current = null;
-    onPageImageChange(null);
-    localStorage.removeItem(LIBRARY_CURRENT_KEY);
+    /* pageImage removed */ localStorage.removeItem(LIBRARY_CURRENT_KEY);
     onClose?.();
   };
-
-  const handleLoadFromLibrary = useCallback(
-    async (name: string) => {
-      const f = await loadPdfFromLibrary(name);
-      if (!f) {
-        // IDB entry gone — remove stale meta
-        setLibrary(removeLibraryMeta(name));
-        return;
-      }
-      setFile(f);
-      setNumPages(0);
-      setPopup(null);
-      setShowSearch(false);
-      setSearchQuery("");
-      setSearchResults([]);
-      setToc([]);
-      setTocIsGenerated(false);
-      setShowToc(false);
-      pdfDocRef.current = null;
-      onPageImageChange(null);
-      const updated = upsertLibraryMeta(f);
-      setLibrary(updated);
-      localStorage.setItem(LIBRARY_CURRENT_KEY, name);
-    },
-    [onPageImageChange],
-  );
-
-  const handleDeleteFromLibrary = useCallback(
-    async (name: string, e: React.MouseEvent) => {
-      e.stopPropagation();
-      await deletePdfFromLibrary(name);
-      setLibrary(removeLibraryMeta(name));
-      if (file?.name === name) {
-        setFile(null);
-        setPopup(null);
-        setToc([]);
-        setTocIsGenerated(false);
-        pdfDocRef.current = null;
-        onPageImageChange(null);
-        localStorage.removeItem(LIBRARY_CURRENT_KEY);
-      }
-    },
-    [file?.name, onPageImageChange],
-  );
 
   // Empty state
   if (isRestoring) {
@@ -1472,312 +1510,147 @@ export default function PdfViewer({
 
   if (!file) {
     return (
-      <div
-        className={`flex-1 flex flex-col items-center justify-center h-full transition-colors ${
-          isDraggingOver ? "bg-blue-50" : "bg-gray-50"
-        }`}
-        onDrop={handleDrop}
-        onDragOver={(e) => {
-          e.preventDefault();
-          setIsDraggingOver(true);
-        }}
-        onDragLeave={() => setIsDraggingOver(false)}
-      >
+      <div className="flex-1 flex overflow-hidden">
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".pdf"
+          onChange={handleInputChange}
+          className="hidden"
+        />
         <div
-          className={`flex flex-col items-center gap-4 border-2 border-dashed rounded-2xl px-10 py-12 transition-colors ${
-            isDraggingOver
-              ? "border-blue-400 bg-blue-50"
-              : "border-gray-300 bg-white"
+          className={`flex-1 flex flex-col items-center justify-center overflow-hidden transition-colors ${
+            isDraggingOver ? "bg-blue-50" : "bg-gray-50"
           }`}
+          onDrop={handleDrop}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setIsDraggingOver(true);
+          }}
+          onDragLeave={() => setIsDraggingOver(false)}
         >
-          <div className="w-14 h-14 rounded-full bg-gray-100 flex items-center justify-center">
-            <svg
-              className="w-7 h-7 text-gray-400"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={1.5}
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"
-              />
-            </svg>
-          </div>
-          <div className="text-center">
-            <p className="text-sm font-medium text-gray-700">
-              PDF 파일을 여기에 놓거나
-            </p>
-            <p className="text-xs text-gray-500 mt-0.5">
-              파일을 선택해서 불러오세요
-            </p>
-          </div>
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="px-4 py-2 text-sm font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+          <div
+            className={`flex flex-col items-center gap-4 border-2 border-dashed rounded-2xl px-10 py-12 transition-colors ${
+              isDraggingOver
+                ? "border-blue-400 bg-blue-50"
+                : "border-gray-300 bg-white"
+            }`}
           >
-            파일 선택
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".pdf"
-            onChange={handleInputChange}
-            className="hidden"
-          />
-        </div>
-        <p className="text-xs text-gray-400 mt-4">
-          업로드 없이 브라우저에서만 사용됩니다
-        </p>
-
-        {/* Recent files list */}
-        {library.length > 0 && (
-          <div className="mt-6 w-full max-w-sm">
-            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2 px-1">
-              최근 파일
-            </p>
-            <div className="space-y-1.5">
-              {library.map((entry) => (
-                <div
-                  key={entry.name}
-                  onClick={() => handleLoadFromLibrary(entry.name)}
-                  className="flex items-center gap-3 px-3 py-2.5 rounded-xl bg-white border border-gray-200 hover:border-blue-300 hover:bg-blue-50 cursor-pointer group transition-colors"
-                >
-                  {/* PDF icon */}
-                  <svg
-                    className="w-8 h-8 text-red-400 shrink-0"
-                    fill="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z"
-                      opacity={0.3}
-                    />
-                    <path
-                      d="M14 2v6h6M9 13h6M9 17h4"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth={1.5}
-                      strokeLinecap="round"
-                    />
-                    <path
-                      d="M14 2v6h6"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth={1.5}
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-gray-800 truncate">
-                      {entry.name}
-                    </p>
-                    <p className="text-xs text-gray-400 mt-0.5">
-                      {formatFileSize(entry.size)} ·{" "}
-                      {formatLastOpened(entry.lastOpened)}
-                    </p>
-                  </div>
-                  <button
-                    onClick={(e) => handleDeleteFromLibrary(entry.name, e)}
-                    title="목록에서 삭제"
-                    className="opacity-0 group-hover:opacity-100 p-1 rounded-md text-gray-400 hover:text-red-500 hover:bg-red-50 transition-all shrink-0"
-                  >
-                    <svg
-                      className="w-3.5 h-3.5"
-                      fill="none"
-                      viewBox="0 0 24 24"
-                      stroke="currentColor"
-                      strokeWidth={2}
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                      />
-                    </svg>
-                  </button>
-                </div>
-              ))}
+            <div className="w-14 h-14 rounded-full bg-gray-100 flex items-center justify-center">
+              <svg
+                className="w-7 h-7 text-gray-400"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={1.5}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"
+                />
+              </svg>
             </div>
+            <div className="text-center">
+              <p className="text-sm font-medium text-gray-700">
+                PDF 파일을 여기에 놓거나
+              </p>
+              <p className="text-xs text-gray-500 mt-0.5">
+                파일을 선택해서 불러오세요
+              </p>
+            </div>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="px-4 py-2 text-sm font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+            >
+              파일 선택
+            </button>
           </div>
-        )}
+          <p className="text-xs text-gray-400 mt-4">
+            업로드 없이 브라우저에서만 사용됩니다
+          </p>
+        </div>
       </div>
     );
   }
 
   return (
-    <div
-      className="flex-1 flex flex-col overflow-hidden bg-gray-100"
-      ref={containerRef}
-    >
-      {/* Toolbar */}
-      <div className="flex items-center gap-2 px-4 py-2 bg-white border-b border-gray-200 shrink-0">
-        <span
-          className="text-sm text-gray-600 truncate flex-1 min-w-0"
-          title={file.name}
-        >
-          {file.name}
-        </span>
+    <div className="flex-1 flex overflow-hidden">
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".pdf"
+        onChange={handleInputChange}
+        className="hidden"
+      />
+      <div
+        className="relative flex-1 flex flex-col overflow-hidden bg-gray-50"
+        ref={containerRef}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-3 py-2 bg-white border-b border-gray-200 shrink-0">
+          {/* Center section: file name */}
+          <div className="flex items-center gap-2 min-w-0">
+            <span
+              className="text-sm text-gray-600 truncate max-w-[200px]"
+              title={file.name}
+            >
+              {file.name}
+            </span>
+          </div>
 
-        {/* TOC button — only shown when PDF has an outline */}
-        {toc.length > 0 && (
-          <div
-            className="relative shrink-0"
-            onMouseEnter={() => {
-              if (tocLeaveTimerRef.current)
-                clearTimeout(tocLeaveTimerRef.current);
-              setShowToc(true);
-            }}
-            onMouseLeave={() => {
-              tocLeaveTimerRef.current = setTimeout(
-                () => setShowToc(false),
-                150,
-              );
-            }}
-          >
+          {/* Right section: language, TOC, search, close */}
+          <div className="flex items-center gap-1 shrink-0">
+            {/* Language selector button */}
             <button
-              title="목차"
-              className={`p-1.5 rounded-lg transition-colors ${
-                showToc
-                  ? "bg-blue-100 text-blue-600"
-                  : "text-gray-400 hover:text-gray-600 hover:bg-gray-100"
+              onClick={() => setShowLangModal(true)}
+              title="학습 언어 선택"
+              className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium transition-colors ${
+                language
+                  ? "text-gray-600 hover:bg-gray-100"
+                  : "text-amber-600 bg-amber-50 hover:bg-amber-100 border border-amber-200"
               }`}
             >
-              <svg
-                className="w-3.5 h-3.5"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M4 6h16M4 10h16M4 14h10M4 18h10"
-                />
-              </svg>
-            </button>
-
-            {showToc && (
-              <div className="absolute right-0 top-full mt-1 z-50 bg-white border border-gray-200 rounded-xl shadow-lg w-64 max-h-80 overflow-y-auto">
-                {tocIsGenerated && (
-                  <div className="px-3 py-1.5 border-b border-gray-100 flex items-center gap-1.5">
-                    <span className="text-[10px] text-amber-600 font-medium">
-                      자동 생성됨
-                    </span>
-                    <span className="text-[10px] text-gray-400">
-                      · 폰트 크기 기반
-                    </span>
-                  </div>
-                )}
-                <div className="p-1">
-                  {toc.map((item, i) => (
-                    <button
-                      key={i}
-                      onClick={() => {
-                        setPageNumber(item.page);
-                        setShowToc(false);
-                      }}
-                      style={{ paddingLeft: `${8 + item.level * 12}px` }}
-                      className="w-full text-left py-1.5 pr-2.5 rounded-lg hover:bg-blue-50 transition-colors flex items-center justify-between gap-2 group"
-                    >
-                      <span className="text-xs text-gray-700 group-hover:text-gray-900 truncate">
-                        {item.title}
-                      </span>
-                      <span className="text-xs text-gray-400 shrink-0 tabular-nums">
-                        {item.page}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Search toggle button */}
-        <div
-          className="relative shrink-0"
-          onMouseEnter={() => {
-            if (searchLeaveTimerRef.current)
-              clearTimeout(searchLeaveTimerRef.current);
-            setShowSearch(true);
-          }}
-          onMouseLeave={() => {
-            searchLeaveTimerRef.current = setTimeout(
-              () => setShowSearch(false),
-              150,
-            );
-          }}
-        >
-          <button
-            title="내용 찾기 (⌘F)"
-            className={`p-1.5 rounded-lg transition-colors ${
-              showSearch
-                ? "bg-blue-100 text-blue-600"
-                : "text-gray-400 hover:text-gray-600 hover:bg-gray-100"
-            }`}
-          >
-            <svg
-              className="w-3.5 h-3.5"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <circle cx="11" cy="11" r="8" />
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M21 21l-4.35-4.35"
-              />
-            </svg>
-          </button>
-
-          {showSearch && (
-            <div className="absolute right-0 top-full mt-1 z-50 bg-white border border-gray-200 rounded-xl shadow-lg w-80 p-3">
-              {/* Input row */}
-              <div className="flex items-center gap-2 mb-2">
-                <div className="relative flex-1">
-                  <svg
-                    className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                  >
-                    <circle cx="11" cy="11" r="8" />
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      d="M21 21l-4.35-4.35"
-                    />
+              {language ? (
+                <>
+                  <span className="text-sm leading-none">
+                    {TTS_LANGUAGES.find((l) => l.code === language)?.flag}
+                  </span>
+                  <span>{TTS_LANGUAGES.find((l) => l.code === language)?.label}</span>
+                </>
+              ) : (
+                <>
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                    <circle cx="12" cy="12" r="10" />
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M2 12h20M12 2a15.3 15.3 0 010 20M12 2a15.3 15.3 0 000 20" />
                   </svg>
-                  <input
-                    ref={searchInputRef}
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Escape") {
-                        setShowSearch(false);
-                        setSearchQuery("");
-                        setSearchResults([]);
-                      }
-                    }}
-                    placeholder="페이지 내용 검색..."
-                    className="w-full pl-8 pr-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  />
-                </div>
+                  <span>언어 선택</span>
+                </>
+              )}
+            </button>
+            {/* TOC button */}
+            {toc.length > 0 && (
+              <div
+                className="relative"
+                onMouseEnter={() => {
+                  if (tocLeaveTimerRef.current)
+                    clearTimeout(tocLeaveTimerRef.current);
+                  setShowToc(true);
+                }}
+                onMouseLeave={() => {
+                  tocLeaveTimerRef.current = setTimeout(
+                    () => setShowToc(false),
+                    150,
+                  );
+                }}
+              >
                 <button
-                  onClick={() => {
-                    setShowSearch(false);
-                    setSearchQuery("");
-                    setSearchResults([]);
-                  }}
-                  className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors shrink-0"
-                  title="닫기 (Esc)"
+                  title="목차"
+                  className={`p-1.5 rounded-lg transition-colors ${
+                    showToc
+                      ? "bg-blue-100 text-blue-600"
+                      : "text-gray-400 hover:text-gray-600 hover:bg-gray-100"
+                  }`}
                 >
                   <svg
                     className="w-3.5 h-3.5"
@@ -1789,430 +1662,971 @@ export default function PdfViewer({
                     <path
                       strokeLinecap="round"
                       strokeLinejoin="round"
-                      d="M6 18L18 6M6 6l12 12"
+                      d="M4 6h16M4 10h16M4 14h10M4 18h10"
                     />
                   </svg>
                 </button>
-              </div>
 
-              {/* Results */}
-              {isSearching && (
-                <div className="flex items-center gap-2 text-xs text-gray-400 py-1">
-                  <span className="w-3 h-3 border border-gray-300 border-t-blue-500 rounded-full animate-spin shrink-0" />
-                  전체 페이지 검색 중...
-                </div>
-              )}
-
-              {!isSearching && searchQuery.trim() && (
-                <div className="max-h-44 overflow-y-auto">
-                  {searchResults.length === 0 ? (
-                    <p className="text-xs text-gray-400 py-1">결과 없음</p>
-                  ) : (
-                    <>
-                      <p className="text-xs text-gray-400 mb-1.5">
-                        {searchResults.length}개 페이지 발견
-                      </p>
-                      <div className="space-y-1">
-                        {searchResults.map((r) => (
-                          <button
-                            key={r.page}
-                            onClick={() => {
-                              setPageNumber(r.page);
-                              setShowSearch(false);
-                              setSearchQuery("");
-                              setSearchResults([]);
-                            }}
-                            className="w-full text-left px-2.5 py-2 rounded-lg hover:bg-blue-50 transition-colors flex items-start gap-2.5 group"
-                          >
-                            <span className="text-xs font-semibold text-blue-600 shrink-0 mt-0.5 tabular-nums">
-                              p.{r.page}
-                            </span>
-                            <span className="text-xs text-gray-600 leading-relaxed group-hover:text-gray-900 line-clamp-2">
-                              <ExcerptHighlight
-                                text={r.excerpt}
-                                query={searchQuery.trim()}
-                              />
-                            </span>
-                          </button>
-                        ))}
+                {showToc && (
+                  <div className="absolute right-0 top-full mt-1 z-50 bg-white border border-gray-200 rounded-xl shadow-lg w-64 max-h-80 overflow-y-auto">
+                    {tocIsGenerated && (
+                      <div className="px-3 py-1.5 border-b border-gray-100 flex items-center gap-1.5">
+                        <span className="text-[10px] text-amber-600 font-medium">
+                          자동 생성됨
+                        </span>
+                        <span className="text-[10px] text-gray-400">
+                          · 폰트 크기 기반
+                        </span>
                       </div>
-                    </>
+                    )}
+                    <div className="p-1">
+                      {toc.map((item, i) => (
+                        <button
+                          key={i}
+                          onClick={() => {
+                            setPageNumber(item.page);
+                            setShowToc(false);
+                          }}
+                          style={{ paddingLeft: `${8 + item.level * 12}px` }}
+                          className="w-full text-left py-1.5 pr-2.5 rounded-lg hover:bg-blue-50 transition-colors flex items-center justify-between gap-2 group"
+                        >
+                          <span className="text-xs text-gray-700 group-hover:text-gray-900 truncate">
+                            {item.title}
+                          </span>
+                          <span className="text-xs text-gray-400 shrink-0 tabular-nums">
+                            {item.page}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Search toggle button */}
+            <div
+              className="relative"
+              onMouseEnter={() => {
+                if (searchLeaveTimerRef.current)
+                  clearTimeout(searchLeaveTimerRef.current);
+                setShowSearch(true);
+              }}
+              onMouseLeave={() => {
+                searchLeaveTimerRef.current = setTimeout(
+                  () => setShowSearch(false),
+                  150,
+                );
+              }}
+            >
+              <button
+                title="내용 찾기 (⌘F)"
+                className={`p-1.5 rounded-lg transition-colors ${
+                  showSearch
+                    ? "bg-blue-100 text-blue-600"
+                    : "text-gray-400 hover:text-gray-600 hover:bg-gray-100"
+                }`}
+              >
+                <svg
+                  className="w-3.5 h-3.5"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                >
+                  <circle cx="11" cy="11" r="8" />
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M21 21l-4.35-4.35"
+                  />
+                </svg>
+              </button>
+
+              {showSearch && (
+                <div className="absolute right-0 top-full mt-1 z-50 bg-white border border-gray-200 rounded-xl shadow-lg w-80 p-3">
+                  {/* Input row */}
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className="relative flex-1">
+                      <svg
+                        className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                        strokeWidth={2}
+                      >
+                        <circle cx="11" cy="11" r="8" />
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M21 21l-4.35-4.35"
+                        />
+                      </svg>
+                      <input
+                        ref={searchInputRef}
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Escape") {
+                            setShowSearch(false);
+                            setSearchQuery("");
+                            setSearchResults([]);
+                          }
+                        }}
+                        placeholder="페이지 내용 검색..."
+                        className="w-full pl-8 pr-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      />
+                    </div>
+                    <button
+                      onClick={() => {
+                        setShowSearch(false);
+                        setSearchQuery("");
+                        setSearchResults([]);
+                      }}
+                      className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors shrink-0"
+                      title="닫기 (Esc)"
+                    >
+                      <svg
+                        className="w-3.5 h-3.5"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                        strokeWidth={2}
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M6 18L18 6M6 6l12 12"
+                        />
+                      </svg>
+                    </button>
+                  </div>
+
+                  {/* Results */}
+                  {isSearching && (
+                    <div className="flex items-center gap-2 text-xs text-gray-400 py-1">
+                      <span className="w-3 h-3 border border-gray-300 border-t-blue-500 rounded-full animate-spin shrink-0" />
+                      전체 페이지 검색 중...
+                    </div>
+                  )}
+
+                  {!isSearching && searchQuery.trim() && (
+                    <div className="max-h-44 overflow-y-auto">
+                      {searchResults.length === 0 ? (
+                        <p className="text-xs text-gray-400 py-1">결과 없음</p>
+                      ) : (
+                        <>
+                          <p className="text-xs text-gray-400 mb-1.5">
+                            {searchResults.length}개 페이지 발견
+                          </p>
+                          <div className="space-y-1">
+                            {searchResults.map((r) => (
+                              <button
+                                key={r.page}
+                                onClick={() => {
+                                  setPageNumber(r.page);
+                                  setShowSearch(false);
+                                  setSearchQuery("");
+                                  setSearchResults([]);
+                                }}
+                                className="w-full text-left px-2.5 py-2 rounded-lg hover:bg-blue-50 transition-colors flex items-start gap-2.5 group"
+                              >
+                                <span className="text-xs font-semibold text-blue-600 shrink-0 mt-0.5 tabular-nums">
+                                  p.{r.page}
+                                </span>
+                                <span className="text-xs text-gray-600 leading-relaxed group-hover:text-gray-900 line-clamp-2">
+                                  <ExcerptHighlight
+                                    text={r.excerpt}
+                                    query={searchQuery.trim()}
+                                  />
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                    </div>
                   )}
                 </div>
               )}
             </div>
-          )}
-        </div>
 
-        <button
-          onClick={closeFile}
-          className="text-xs text-gray-400 hover:text-gray-600 transition-colors shrink-0"
-          title="다른 파일 열기"
-        >
-          닫기
-        </button>
-      </div>
-
-      {/* Page area */}
-      <div className="flex-1 overflow-y-auto flex justify-center px-4 py-4">
-        <Document
-          file={file}
-          options={DOCUMENT_OPTIONS}
-          onLoadSuccess={async (pdf) => {
-            setNumPages(pdf.numPages);
-            pdfDocRef.current = pdf;
-            setToc([]);
-            setTocIsGenerated(false);
-            try {
-              const outline = await pdf.getOutline();
-              if (outline?.length) {
-                const resolved = await flattenOutline(pdf, outline, 0);
-                setToc(resolved);
-                setTocIsGenerated(false);
-              } else {
-                // No built-in outline → auto-generate from font-size heuristic
-                const generated = await generateTocFromContent(
-                  pdf,
-                  pdf.numPages,
-                );
-                setToc(generated);
-                setTocIsGenerated(true);
-              }
-            } catch {
-              /* PDF has no outline */
-            }
-          }}
-          loading={
-            <div className="flex items-center gap-2 text-gray-400 text-sm mt-16">
-              <span className="w-4 h-4 border-2 border-gray-300 border-t-blue-500 rounded-full animate-spin" />
-              PDF 불러오는 중...
-            </div>
-          }
-          error={
-            <div className="text-red-500 text-sm mt-16">
-              PDF를 불러올 수 없습니다.
-            </div>
-          }
-        >
-          <div className="relative">
-            <Page
-              pageNumber={pageNumber}
-              renderTextLayer={true}
-              renderAnnotationLayer={false}
-              className="shadow-md"
-              width={Math.min(
-                (containerRef.current?.clientWidth ?? 600) - 32,
-                760,
-              )}
-              onRenderSuccess={() => {
-                const canvas = containerRef.current?.querySelector(
-                  "canvas",
-                ) as HTMLCanvasElement | null;
-                if (!canvas) return;
-                try {
-                  const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
-                  onPageImageChange(
-                    dataUrl.replace("data:image/jpeg;base64,", ""),
-                  );
-                } catch {
-                  onPageImageChange(null);
-                }
-              }}
-            />
-            {/* Canvas-accurate hover highlight overlay (light blue) */}
-            {highlightRects.map((rect, i) => (
-              <div
-                key={`h-${i}`}
-                className="absolute pointer-events-none"
-                style={{
-                  left: rect.left,
-                  top: rect.top,
-                  width: rect.width,
-                  height: rect.height,
-                  backgroundColor: "rgba(250, 204, 21, 0.35)",
-                  borderRadius: 2,
-                  zIndex: 3,
-                }}
-              />
-            ))}
-            {/* Canvas-accurate selection highlight overlay (darker blue) */}
-            {selectionRects.map((rect, i) => (
-              <div
-                key={`s-${i}`}
-                className="absolute pointer-events-none"
-                style={{
-                  left: rect.left,
-                  top: rect.top,
-                  width: rect.width,
-                  height: rect.height,
-                  backgroundColor: "rgba(250, 204, 21, 0.45)",
-                  borderRadius: 2,
-                  zIndex: 4,
-                }}
-              />
-            ))}
-          </div>
-        </Document>
-      </div>
-
-      {/* Page navigation */}
-      {numPages > 0 && (
-        <div className="flex items-center justify-center gap-3 py-2 bg-white border-t border-gray-200 shrink-0">
-          <button
-            onClick={() => setPageNumber((p) => Math.max(1, p - 1))}
-            disabled={pageNumber <= 1}
-            className="p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-            aria-label="이전 페이지"
-          >
-            <svg
-              className="w-4 h-4"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
+            <button
+              onClick={closeFile}
+              className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+              title="닫기"
             >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M15 19l-7-7 7-7"
-              />
-            </svg>
-          </button>
-          <span className="flex items-center gap-1 text-sm text-gray-600 tabular-nums">
-            {pageInputStr === null ? (
-              <button
-                onClick={() => setPageInputStr(String(pageNumber))}
-                title="클릭하여 페이지 입력"
-                className="min-w-[2rem] text-center px-1 py-0.5 rounded hover:bg-gray-100 transition-colors"
+              <svg
+                className="w-3.5 h-3.5"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
               >
-                {pageNumber}
-              </button>
-            ) : (
-              <input
-                autoFocus
-                type="text"
-                inputMode="numeric"
-                value={pageInputStr}
-                onChange={(e) => setPageInputStr(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    const n = parseInt(pageInputStr, 10);
-                    if (!isNaN(n) && n >= 1 && n <= numPages) setPageNumber(n);
-                    setPageInputStr(null);
-                  } else if (e.key === "Escape") {
-                    setPageInputStr(null);
-                  }
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M6 18L18 6M6 6l12 12"
+                />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        {/* Page area */}
+        <div className="flex-1 overflow-y-auto flex justify-center items-start px-4 py-4 pb-16">
+          <Document
+            file={file}
+            options={DOCUMENT_OPTIONS}
+            onLoadSuccess={async (pdf) => {
+              setNumPages(pdf.numPages);
+              pdfDocRef.current = pdf;
+              setToc([]);
+              setTocIsGenerated(false);
+              try {
+                const outline = await pdf.getOutline();
+                if (outline?.length) {
+                  const resolved = await flattenOutline(pdf, outline, 0);
+                  setToc(resolved);
+                  setTocIsGenerated(false);
+                } else {
+                  // No built-in outline → auto-generate from font-size heuristic
+                  const generated = await generateTocFromContent(
+                    pdf,
+                    pdf.numPages,
+                  );
+                  setToc(generated);
+                  setTocIsGenerated(true);
+                }
+              } catch {
+                /* PDF has no outline */
+              }
+            }}
+            loading={
+              <div className="flex items-center gap-2 text-gray-400 text-sm mt-16">
+                <span className="w-4 h-4 border-2 border-gray-300 border-t-blue-500 rounded-full animate-spin" />
+                PDF 불러오는 중...
+              </div>
+            }
+            error={
+              <div className="text-red-500 text-sm mt-16">
+                PDF를 불러올 수 없습니다.
+              </div>
+            }
+          >
+            <div
+              className="relative"
+              onClick={(e) => {
+                if (!isNoteMode) return;
+                const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
+                const xPct = ((e.clientX - rect.left) / rect.width) * 100;
+                const yPct = ((e.clientY - rect.top) / rect.height) * 100;
+                setPendingNote({ xPct, yPct });
+                setNoteText("");
+                setEditingAnnot(null);
+              }}
+              style={isNoteMode ? { cursor: "crosshair" } : undefined}
+            >
+              <Page
+                pageNumber={pageNumber}
+                renderTextLayer={true}
+                renderAnnotationLayer={false}
+                className="shadow-md"
+                width={
+                  Math.min(
+                    (containerRef.current?.clientWidth ?? 600) - 32,
+                    760,
+                  ) * scale
+                }
+                onRenderSuccess={() => {
+                  onPageChange?.(pageNumber);
                 }}
-                onBlur={() => {
-                  const n = parseInt(pageInputStr, 10);
-                  if (!isNaN(n) && n >= 1 && n <= numPages) setPageNumber(n);
-                  setPageInputStr(null);
-                }}
-                className="w-10 text-center px-1 py-0.5 text-sm border border-blue-400 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
               />
+              {/* Canvas-accurate hover highlight overlay (light blue) */}
+              {highlightRects.map((rect, i) => (
+                <div
+                  key={`h-${i}`}
+                  className="absolute pointer-events-none"
+                  style={{
+                    left: rect.left,
+                    top: rect.top,
+                    width: rect.width,
+                    height: rect.height,
+                    backgroundColor: "rgba(250, 204, 21, 0.35)",
+                    borderRadius: 2,
+                    zIndex: 3,
+                  }}
+                />
+              ))}
+              {/* Canvas-accurate selection highlight overlay (darker blue) */}
+              {selectionRects.map((rect, i) => (
+                <div
+                  key={`s-${i}`}
+                  className="absolute pointer-events-none"
+                  style={{
+                    left: rect.left,
+                    top: rect.top,
+                    width: rect.width,
+                    height: rect.height,
+                    backgroundColor: "rgba(250, 204, 21, 0.45)",
+                    borderRadius: 2,
+                    zIndex: 4,
+                  }}
+                />
+              ))}
+              {/* Annotation pins */}
+              {annotations.map((ann) => (
+                <div
+                  key={ann.id}
+                  className="absolute"
+                  style={{
+                    left: `${ann.x_pct}%`,
+                    top: `${ann.y_pct}%`,
+                    transform: "translate(-50%, -100%)",
+                    zIndex: 10,
+                  }}
+                >
+                  <button
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setEditingAnnot(ann);
+                      setNoteText(ann.text);
+                      setNoteColor(ann.color);
+                      setPendingNote(null);
+                    }}
+                    title={ann.text}
+                    className="text-lg leading-none hover:scale-125 transition-transform"
+                  >
+                    📌
+                  </button>
+                  {/* Edit popover */}
+                  {editingAnnot?.id === ann.id && (
+                    <div
+                      className="absolute left-1/2 -translate-x-1/2 mt-1 w-56 bg-white border border-gray-200 rounded-lg shadow-xl p-2 z-20 flex flex-col gap-2"
+                      style={{ top: "100%" }}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <textarea
+                        className="w-full text-xs border border-gray-200 rounded p-1.5 resize-none focus:outline-none focus:ring-1 focus:ring-blue-400"
+                        rows={3}
+                        value={noteText}
+                        onChange={(e) => setNoteText(e.target.value)}
+                        autoFocus
+                      />
+                      <div className="flex gap-1.5">
+                        {["yellow", "pink", "green", "blue"].map((c) => (
+                          <button
+                            key={c}
+                            onClick={() => setNoteColor(c)}
+                            className={`w-5 h-5 rounded-full border-2 transition-transform ${noteColor === c ? "scale-125 border-gray-700" : "border-transparent"}`}
+                            style={{ backgroundColor: c === "yellow" ? "#fef08a" : c === "pink" ? "#fecdd3" : c === "green" ? "#bbf7d0" : "#bfdbfe" }}
+                          />
+                        ))}
+                      </div>
+                      <div className="flex gap-1.5 justify-end">
+                        <button
+                          className="text-xs text-red-500 hover:text-red-700 px-1.5 py-0.5"
+                          onClick={async () => {
+                            if (!serverId) return;
+                            await deleteAnnotation(serverId, ann.id);
+                            setAnnotations((prev) => prev.filter((a) => a.id !== ann.id));
+                            setEditingAnnot(null);
+                          }}
+                        >
+                          삭제
+                        </button>
+                        <button
+                          className="text-xs bg-gray-100 hover:bg-gray-200 px-2 py-0.5 rounded"
+                          onClick={() => setEditingAnnot(null)}
+                        >
+                          취소
+                        </button>
+                        <button
+                          className="text-xs bg-blue-500 text-white hover:bg-blue-600 px-2 py-0.5 rounded"
+                          onClick={async () => {
+                            if (!serverId) return;
+                            const updated = await updateAnnotation(serverId, ann.id, noteText, noteColor);
+                            if (updated) {
+                              setAnnotations((prev) => prev.map((a) => a.id === ann.id ? updated : a));
+                            }
+                            setEditingAnnot(null);
+                          }}
+                        >
+                          저장
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+              {/* Pending new note form */}
+              {pendingNote && (
+                <div
+                  className="absolute z-20"
+                  style={{
+                    left: `${pendingNote.xPct}%`,
+                    top: `${pendingNote.yPct}%`,
+                    transform: "translate(-50%, 4px)",
+                  }}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="w-56 bg-white border border-gray-200 rounded-lg shadow-xl p-2 flex flex-col gap-2">
+                    <textarea
+                      className="w-full text-xs border border-gray-200 rounded p-1.5 resize-none focus:outline-none focus:ring-1 focus:ring-blue-400"
+                      rows={3}
+                      placeholder="메모 입력..."
+                      value={noteText}
+                      onChange={(e) => setNoteText(e.target.value)}
+                      autoFocus
+                    />
+                    <div className="flex gap-1.5">
+                      {["yellow", "pink", "green", "blue"].map((c) => (
+                        <button
+                          key={c}
+                          onClick={() => setNoteColor(c)}
+                          className={`w-5 h-5 rounded-full border-2 transition-transform ${noteColor === c ? "scale-125 border-gray-700" : "border-transparent"}`}
+                          style={{ backgroundColor: c === "yellow" ? "#fef08a" : c === "pink" ? "#fecdd3" : c === "green" ? "#bbf7d0" : "#bfdbfe" }}
+                        />
+                      ))}
+                    </div>
+                    <div className="flex gap-1.5 justify-end">
+                      <button
+                        className="text-xs bg-gray-100 hover:bg-gray-200 px-2 py-0.5 rounded"
+                        onClick={() => setPendingNote(null)}
+                      >
+                        취소
+                      </button>
+                      <button
+                        className="text-xs bg-blue-500 text-white hover:bg-blue-600 px-2 py-0.5 rounded disabled:opacity-50"
+                        disabled={!noteText.trim()}
+                        onClick={async () => {
+                          if (!serverId || !noteText.trim()) return;
+                          const created = await createAnnotation(
+                            serverId, pageNumber,
+                            pendingNote.xPct, pendingNote.yPct,
+                            noteText.trim(), noteColor,
+                          );
+                          if (created) setAnnotations((prev) => [...prev, created]);
+                          setPendingNote(null);
+                          setNoteText("");
+                        }}
+                      >
+                        저장
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </Document>
+
+        </div>
+
+        {/* Floating bottom toolbar */}
+        {file && numPages > 0 && (
+          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-0.5 px-1 py-1 bg-white/90 backdrop-blur-sm border border-gray-200 rounded-lg shadow-lg text-sm text-gray-600 min-w-max">
+            {/* Zoom out */}
+            <button
+              onClick={() =>
+                setScale((s) =>
+                  Math.max(0.5, parseFloat((s - 0.1).toFixed(1))),
+                )
+              }
+              title="축소"
+              className="p-1.5 rounded-md hover:bg-gray-100 transition-colors"
+            >
+              <svg
+                className="w-4 h-4"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M20 12H4"
+                />
+              </svg>
+            </button>
+            {/* Fit */}
+            <button
+              onClick={() => setScale(1.0)}
+              title="맞춤"
+              className="p-1.5 rounded-md hover:bg-gray-100 transition-colors"
+            >
+              <svg
+                className="w-4 h-4"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3"
+                />
+              </svg>
+            </button>
+            {/* Zoom in */}
+            <button
+              onClick={() =>
+                setScale((s) =>
+                  Math.min(2.0, parseFloat((s + 0.1).toFixed(1))),
+                )
+              }
+              title="확대"
+              className="p-1.5 rounded-md hover:bg-gray-100 transition-colors"
+            >
+              <svg
+                className="w-4 h-4"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M12 5v14M5 12h14"
+                />
+              </svg>
+            </button>
+            <div className="w-px h-4 bg-gray-200 mx-0.5" />
+            {/* Prev page */}
+            <button
+              onClick={() => setPageNumber((p) => Math.max(1, p - 1))}
+              disabled={pageNumber <= 1}
+              title="이전 페이지"
+              className="p-1.5 rounded-md hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            >
+              <svg
+                className="w-4 h-4"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M15 19l-7-7 7-7"
+                />
+              </svg>
+            </button>
+            {/* Page indicator */}
+            <div className="flex items-center gap-1 text-xs tabular-nums px-1">
+              {pageInputStr === null ? (
+                <button
+                  onClick={() => setPageInputStr(String(pageNumber))}
+                  title="클릭하여 페이지 입력"
+                  className="min-w-6 text-center hover:bg-gray-100 rounded px-0.5"
+                >
+                  {pageNumber}
+                </button>
+              ) : (
+                <input
+                  autoFocus
+                  type="text"
+                  inputMode="numeric"
+                  value={pageInputStr ?? ""}
+                  onChange={(e) => setPageInputStr(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      const n = parseInt(pageInputStr ?? "", 10);
+                      if (!isNaN(n) && n >= 1 && n <= numPages)
+                        setPageNumber(n);
+                      setPageInputStr(null);
+                    } else if (e.key === "Escape") {
+                      setPageInputStr(null);
+                    }
+                  }}
+                  onBlur={() => {
+                    const n = parseInt(pageInputStr ?? "", 10);
+                    if (!isNaN(n) && n >= 1 && n <= numPages)
+                      setPageNumber(n);
+                    setPageInputStr(null);
+                  }}
+                  className="w-8 text-center border border-blue-400 rounded focus:outline-none"
+                />
+              )}
+              <span className="text-gray-400">/ {numPages}</span>
+            </div>
+            {/* Next page */}
+            <button
+              onClick={() => setPageNumber((p) => Math.min(numPages, p + 1))}
+              disabled={pageNumber >= numPages}
+              title="다음 페이지"
+              className="p-1.5 rounded-md hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            >
+              <svg
+                className="w-4 h-4"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M9 5l7 7-7 7"
+                />
+              </svg>
+            </button>
+            <div className="w-px h-4 bg-gray-200 mx-0.5" />
+            {/* Search */}
+            <button
+              onClick={() => {
+                if (searchLeaveTimerRef.current)
+                  clearTimeout(searchLeaveTimerRef.current);
+                setShowSearch((v) => !v);
+              }}
+              title="검색 (⌘F)"
+              className={`p-1.5 rounded-md transition-colors ${showSearch ? "bg-blue-100 text-blue-600" : "hover:bg-gray-100"}`}
+            >
+              <svg
+                className="w-4 h-4"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <circle cx="11" cy="11" r="8" />
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M21 21l-4.35-4.35"
+                />
+              </svg>
+            </button>
+            {/* Note mode toggle — only when PDF is server-uploaded */}
+            {serverId && (
+              <>
+                <div className="w-px h-4 bg-gray-200 mx-0.5" />
+                <button
+                  onClick={() => {
+                    setIsNoteMode((v) => !v);
+                    setPendingNote(null);
+                  }}
+                  title={isNoteMode ? "메모 모드 끄기" : "메모 추가"}
+                  className={`p-1.5 rounded-md transition-colors ${isNoteMode ? "bg-yellow-100 text-yellow-700" : "hover:bg-gray-100"}`}
+                >
+                  <svg
+                    className="w-4 h-4"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
+                    />
+                  </svg>
+                </button>
+              </>
             )}
-            <span>/ {numPages}</span>
-          </span>
-          <button
-            onClick={() => setPageNumber((p) => Math.min(numPages, p + 1))}
-            disabled={pageNumber >= numPages}
-            className="p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-            aria-label="다음 페이지"
-          >
-            <svg
-              className="w-4 h-4"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M9 5l7 7-7 7"
-              />
-            </svg>
-          </button>
-        </div>
-      )}
+          </div>
+        )}
 
-      {/* Hover popup */}
-      {hoverPopup && !popup && (
-        <div
-          id="pdf-hover-popup"
-          className="fixed z-40 bg-white border border-gray-200 rounded-xl shadow-md overflow-hidden flex"
-          style={{
-            left: Math.min(hoverPopup.x - 4, window.innerWidth - 220),
-            top: hoverPopup.y - 52 < 8 ? hoverPopup.y + 20 : hoverPopup.y - 52,
-          }}
-          onMouseEnter={() => {
-            if (hoverHideTimer.current) clearTimeout(hoverHideTimer.current);
-          }}
-          onMouseLeave={() => {
-            hoverHideTimer.current = setTimeout(() => setHoverPopup(null), 200);
-          }}
-        >
-          <button
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => speak(hoverPopup.text)}
-            className="px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50 active:bg-gray-200 active:scale-95 transition-all flex items-center gap-1.5"
-            title="소리 내어 읽기"
-          >
-            <svg
-              className="w-3.5 h-3.5"
-              fill="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z" />
-            </svg>
-            소리
-          </button>
-          <div className="w-px bg-gray-200" />
-          <button
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => {
-              navigator.clipboard.writeText(hoverPopup.text);
-              setHoverPopup(null);
+        {/* Hover popup */}
+        {hoverPopup && !popup && (
+          <div
+            id="pdf-hover-popup"
+            className="fixed z-40 bg-white border border-gray-200 rounded-xl shadow-md overflow-hidden flex"
+            style={{
+              left: Math.min(hoverPopup.x - 4, window.innerWidth - 220),
+              top:
+                hoverPopup.y - 52 < 8 ? hoverPopup.y + 20 : hoverPopup.y - 52,
             }}
-            className="px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50 active:bg-gray-200 active:scale-95 transition-all flex items-center gap-1.5"
-            title="클립보드에 복사"
-          >
-            <svg
-              className="w-3.5 h-3.5"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"
-              />
-            </svg>
-            복사
-          </button>
-          <div className="w-px bg-gray-200" />
-          <button
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => {
-              onTextSelect({ text: hoverPopup.text, id: Date.now() });
-              setHoverPopup(null);
+            onMouseEnter={() => {
+              if (hoverHideTimer.current) clearTimeout(hoverHideTimer.current);
             }}
-            className="px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-50 active:bg-blue-200 active:scale-95 transition-all flex items-center gap-1.5"
-            title="질문하기"
-          >
-            <svg
-              className="w-3.5 h-3.5"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"
-              />
-            </svg>
-            질문하기
-          </button>
-          <div className="w-px bg-gray-200" />
-          <button
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => {
-              setPracticePdfText(hoverPopup.text);
-              setHoverPopup(null);
+            onMouseLeave={() => {
+              hoverHideTimer.current = setTimeout(
+                () => setHoverPopup(null),
+                200,
+              );
             }}
-            className="px-3 py-2 text-xs font-medium text-purple-700 hover:bg-purple-50 active:bg-purple-200 active:scale-95 transition-all flex items-center gap-1.5"
-            title="발음 연습"
           >
-            <svg
-              className="w-3.5 h-3.5"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
+            <button
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => speak(hoverPopup.text)}
+              className="px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50 active:bg-gray-200 active:scale-95 transition-all flex items-center gap-1.5"
+              title="소리 내어 읽기"
             >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"
-              />
-            </svg>
-            연습
-          </button>
-        </div>
-      )}
+              <svg
+                className="w-3.5 h-3.5"
+                fill="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z" />
+              </svg>
+              소리
+            </button>
+            <div className="w-px bg-gray-200" />
+            <button
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                navigator.clipboard.writeText(hoverPopup.text);
+                setHoverPopup(null);
+              }}
+              className="px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50 active:bg-gray-200 active:scale-95 transition-all flex items-center gap-1.5"
+              title="클립보드에 복사"
+            >
+              <svg
+                className="w-3.5 h-3.5"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"
+                />
+              </svg>
+              복사
+            </button>
+            <div className="w-px bg-gray-200" />
+            <button
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                onTextSelect({ text: hoverPopup.text, id: Date.now() });
+                setHoverPopup(null);
+              }}
+              className="px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-50 active:bg-blue-200 active:scale-95 transition-all flex items-center gap-1.5"
+              title="질문하기"
+            >
+              <svg
+                className="w-3.5 h-3.5"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"
+                />
+              </svg>
+              질문하기
+            </button>
+            <div className="w-px bg-gray-200" />
+            <button
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                setPracticePdfText(hoverPopup.text);
+                setHoverPopup(null);
+              }}
+              className="px-3 py-2 text-xs font-medium text-purple-700 hover:bg-purple-50 active:bg-purple-200 active:scale-95 transition-all flex items-center gap-1.5"
+              title="발음 연습"
+            >
+              <svg
+                className="w-3.5 h-3.5"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"
+                />
+              </svg>
+              연습
+            </button>
+          </div>
+        )}
 
-      {/* Selection popup */}
-      {popup && (
-        <div
-          id="pdf-selection-popup"
-          className="fixed z-50 bg-white border border-gray-200 rounded-xl shadow-lg overflow-hidden flex"
-          style={{
-            left: Math.min(popup.x - 4, window.innerWidth - 200),
-            top: popup.y - 48,
-          }}
-          onMouseLeave={(e) => {
-            hoverBlockOriginRef.current = { x: e.clientX, y: e.clientY };
-            setPopup(null);
-            window.getSelection()?.removeAllRanges();
-          }}
-        >
-          <button
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => speak(popup.text)}
-            className="px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50 active:bg-gray-200 active:scale-95 transition-all flex items-center gap-1.5"
-          >
-            <svg
-              className="w-3.5 h-3.5"
-              fill="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z" />
-            </svg>
-            소리
-          </button>
-          <div className="w-px bg-gray-200" />
-          <button
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={(e) => {
+        {/* Selection popup */}
+        {popup && (
+          <div
+            id="pdf-selection-popup"
+            className="fixed z-50 bg-white border border-gray-200 rounded-xl shadow-md overflow-hidden flex flex-col"
+            style={{
+              left: Math.min(popup.x - 4, window.innerWidth - 320),
+              top: popup.y - 52 < 8 ? popup.y + 20 : popup.y - 52,
+            }}
+            onMouseLeave={(e) => {
               hoverBlockOriginRef.current = { x: e.clientX, y: e.clientY };
-              onTextSelect({ text: popup.text, id: Date.now() });
               setPopup(null);
+              setPopupTranslation(null);
               window.getSelection()?.removeAllRanges();
             }}
-            className="px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-50 active:bg-blue-200 active:scale-95 transition-all flex items-center gap-1.5"
           >
-            <svg
-              className="w-3.5 h-3.5"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
+          <div className="flex">
+            {/* 소리 */}
+            <button
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => speak(popup.text)}
+              className="px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50 active:bg-gray-200 active:scale-95 transition-all flex items-center gap-1.5"
+              title="소리 내어 읽기"
             >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-3 3z"
-              />
-            </svg>
-            질문하기
-          </button>
-        </div>
-      )}
+              <svg
+                className="w-3.5 h-3.5"
+                fill="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z" />
+              </svg>
+              소리
+            </button>
+            <div className="w-px bg-gray-200" />
+            {/* 복사 */}
+            <button
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                navigator.clipboard.writeText(popup.text);
+                setPopup(null);
+                window.getSelection()?.removeAllRanges();
+              }}
+              className="px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50 active:bg-gray-200 active:scale-95 transition-all flex items-center gap-1.5"
+              title="클립보드에 복사"
+            >
+              <svg
+                className="w-3.5 h-3.5"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"
+                />
+              </svg>
+              복사
+            </button>
+            <div className="w-px bg-gray-200" />
+            {/* 질문하기 */}
+            <button
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={(e) => {
+                hoverBlockOriginRef.current = { x: e.clientX, y: e.clientY };
+                onTextSelect({ text: popup.text, id: Date.now() });
+                setPopup(null);
+                window.getSelection()?.removeAllRanges();
+              }}
+              className="px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-50 active:bg-blue-200 active:scale-95 transition-all flex items-center gap-1.5"
+              title="질문하기"
+            >
+              <svg
+                className="w-3.5 h-3.5"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-3 3z"
+                />
+              </svg>
+              질문하기
+            </button>
+            <div className="w-px bg-gray-200" />
+            {/* 연습 */}
+            <button
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                setPracticePdfText(popup.text);
+                setPopup(null);
+                window.getSelection()?.removeAllRanges();
+              }}
+              className="px-3 py-2 text-xs font-medium text-purple-700 hover:bg-purple-50 active:bg-purple-200 active:scale-95 transition-all flex items-center gap-1.5"
+              title="발음 연습"
+            >
+              <svg
+                className="w-3.5 h-3.5"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"
+                />
+              </svg>
+              연습
+            </button>
+          </div>
+        )}
 
-      {/* Pronunciation practice modal */}
-      {practicePdfText && (
-        <PronunciationModal
-          key={practicePdfText}
-          text={practicePdfText}
-          speak={speak}
-          onClose={() => setPracticePdfText(null)}
-        />
-      )}
+        {/* Pronunciation practice modal */}
+        {practicePdfText && (
+          <PronunciationModal
+            key={practicePdfText}
+            text={practicePdfText}
+            speak={speak}
+            lang={language ?? "de-DE"}
+            onClose={() => setPracticePdfText(null)}
+          />
+        )}
+
+        {/* Language selection modal */}
+        {showLangModal && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+            onClick={() => setShowLangModal(false)}
+          >
+            <div
+              className="bg-white rounded-2xl shadow-xl w-80 p-5"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h2 className="text-sm font-semibold text-gray-800 mb-1">학습 언어 선택</h2>
+              <p className="text-xs text-gray-400 mb-4">
+                선택한 언어로 발음(TTS)이 재생됩니다.
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                {TTS_LANGUAGES.map((lang) => (
+                  <button
+                    key={lang.code}
+                    onClick={() => {
+                      onLanguageChange(lang.code);
+                      setShowLangModal(false);
+                    }}
+                    className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl border text-left transition-colors ${
+                      language === lang.code
+                        ? "border-blue-500 bg-blue-50 text-blue-700"
+                        : "border-gray-200 hover:border-gray-300 hover:bg-gray-50 text-gray-700"
+                    }`}
+                  >
+                    <span className="text-xl leading-none">{lang.flag}</span>
+                    <div className="min-w-0">
+                      <div className="text-xs font-medium truncate">{lang.label}</div>
+                      <div className="text-[10px] text-gray-400 truncate">{lang.name}</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+              <button
+                onClick={() => setShowLangModal(false)}
+                className="mt-4 w-full py-2 text-xs text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-xl transition-colors"
+              >
+                닫기
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
+
+const PdfViewer = forwardRef(PdfViewerInner);
+export default PdfViewer;

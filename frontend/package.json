@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev --turbo",
     "dev:backend": "cd ../backend && .venv/bin/uvicorn app.main:app --reload --port 8000",
-    "dev:all": "concurrently --names \"BACK,FRONT\" --prefix-colors \"blue,green\" \"npm run dev:backend\" \"npm run dev\"",
+    "dev:all": "concurrently --kill-others --names \"BACK,FRONT\" --prefix-colors \"blue,green\" \"npm run dev:backend\" \"npm run dev\"",
     "build": "next build",
     "start": "next start",
     "lint": "next lint"
@@ -13,9 +13,16 @@
   "dependencies": {
     "@supabase/ssr": "^0.8.0",
     "@supabase/supabase-js": "^2.98.0",
-    "next": "^15.5.12",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
+    "@tiptap/extension-placeholder": "^3.20.1",
+    "@tiptap/extension-typography": "^3.20.1",
+    "@tiptap/extension-underline": "^3.20.1",
+    "@tiptap/pm": "^3.20.1",
+    "@tiptap/react": "^3.20.1",
+    "@tiptap/starter-kit": "^3.20.1",
+    "next": "^16.1.6",
+    "pdfjs-dist": "^5.5.207",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
     "react-markdown": "^9.0.1",
     "react-pdf": "^10.4.1",
     "remark-breaks": "^4.0.0",
@@ -25,12 +32,12 @@
     "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "autoprefixer": "^10.4.20",
+    "@tailwindcss/postcss": "^4",
     "concurrently": "^9.2.1",
     "eslint": "^9",
-    "eslint-config-next": "^15.5.12",
+    "eslint-config-next": "^16.1.6",
     "postcss": "^8.4.49",
-    "tailwindcss": "^3.4.17",
+    "tailwindcss": "^4",
     "typescript": "^5"
   }
 }

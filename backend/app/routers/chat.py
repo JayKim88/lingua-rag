@@ -183,6 +183,7 @@ async def chat_endpoint(
                     textbook_id=textbook_id,
                     rag_chunks=rag_chunks or None,
                     page_image=body.page_image or None,
+                    page_text=body.page_text or None,
                 ):
                     if event["type"] == "token":
                         full_response += event["content"]

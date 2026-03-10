@@ -35,6 +35,10 @@ class ChatRequest(BaseModel):
         default=None,
         description="Base64-encoded JPEG of the current PDF page for visual context.",
     )
+    page_text: Optional[str] = Field(
+        default=None,
+        description="Extracted text from the current PDF page for context.",
+    )
 
     model_config = {"json_schema_extra": {"example": {
         "message": "sein 동사의 현재형 변화를 알려주세요",
