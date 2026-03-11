@@ -66,15 +66,28 @@ export async function deletePdfFromLibrary(name: string): Promise<void> {
 // ---------------------------------------------------------------------------
 export function getLibraryMeta(): PdfMeta[] {
   try {
-    const raw: Array<{ name: string; size: number; lastOpened: string; addedAt?: number }> =
+    const raw: Array<{ name: string; size: number; lastOpened: string; addedAt?: number; serverId?: string }> =
       JSON.parse(localStorage.getItem(LIBRARY_META_KEY) ?? "[]");
-    // Backfill addedAt for entries saved before this field was added
-    return raw.map((m, i) => ({
-      name: m.name,
-      size: m.size,
-      lastOpened: m.lastOpened,
-      addedAt: m.addedAt ?? new Date(m.lastOpened).getTime() - i,
-    }));
+    // Backfill addedAt for entries saved before this field was added; deduplicate by name
+    const seen = new Set<string>();
+    const deduped = raw
+      .map((m, i) => ({
+        name: m.name,
+        size: m.size,
+        lastOpened: m.lastOpened,
+        addedAt: m.addedAt ?? new Date(m.lastOpened).getTime() - i,
+        ...(m.serverId ? { serverId: m.serverId } : {}),
+      }))
+      .filter((m) => {
+        if (seen.has(m.name)) return false;
+        seen.add(m.name);
+        return true;
+      });
+    // Persist deduplicated list if it differs from raw
+    if (deduped.length !== raw.length) {
+      localStorage.setItem(LIBRARY_META_KEY, JSON.stringify(deduped));
+    }
+    return deduped;
   } catch { return []; }
 }
 

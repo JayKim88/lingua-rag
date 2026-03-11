@@ -1,120 +1,145 @@
 # LinguaRAG - TODO / Backlog
 
-> AI Engineering (Chip Huyen, 2025) 분석 기반으로 도출한 개선 항목.
-> 우선순위는 ROI(효과 대비 노력) 기준.
->
-> **전략적 맥락 (2026-03-03 기준)**
-> - lingua-rag = 실제 제품 (실사용자 확보 목표) + eval 레이어 (포트폴리오 핵심 증거)
-> - 포트폴리오 스토리: "RAG 앱을 만들었는데 품질 측정이 안됐다 → LLM-as-judge eval 도구 직접 만들어 X→Y% 개선"
-> - 현재 가장 취약한 부분: 실사용자 0명, eval 수치 없음
+> **전략적 맥락 (2026-03-11)**
+> - 피벗: 독일어 전용 튜터 → **범용 AI PDF 언어학습 서비스**
+> - 타겟 포지션: AI Product Engineer / AI Fullstack Engineer (초기 AI 스타트업, 병행)
+> - RAG가 "옵션"에서 **"제품의 핵심"**으로 전환됨
+>   - 유저가 자기 PDF를 올리면 AI는 그 교재 내용을 모름 → RAG가 유일한 교재 근거
+> - 포트폴리오 서사: "독일어 튜터 → 아키텍처 범용화 → 유저 PDF 기반 RAG → 실사용자"
 >
 > **운영 원칙**
-> - 이 파일이 단일 소스. wrap-up Next 섹션은 세션 기록용 (정합성 관리 대상 외)
-> - v0.x 완료 또는 방향 전환 시에만 이 파일 업데이트
+> - 이 파일이 단일 소스. wrap-up Next 섹션은 세션 기록용
+> - Phase 완료 또는 방향 전환 시 업데이트
 
 ---
 
-## 완료
+## 완료 (v0.1 ~ v0.3)
 
-- [x] **Prompt Caching 적용** — 2026-03-03
-  - `claude_service.py`: fixed_prefix(~1,300 tokens)에 `cache_control: ephemeral` 적용
-  - fixed_prefix = TUTOR_ROLE + level modifier + UNIT_SUMMARY_TABLE
-
-- [x] **"Lost in the Middle" 프롬프트 구조 개선** — 2026-03-03
-  - RAG chunks를 dynamic_suffix 앞에 prepend (기존: 뒤에 append)
-
-- [x] **LLM-as-Judge 평가 시스템 구축** — 2026-03-03
-  - `scripts/test_questions.json`: 10개 고정 테스트 질문 (단원별 포맷 유혹 케이스 포함)
-  - `scripts/evaluate.py`: 6규칙 judge runner (Sonnet judge, JSON 리포트 출력)
-  - Baseline → 프롬프트 개선 후 83.3% → 90.0% 달성
-  - ANSWER_FORMAT 강화: 괄호 안·헤딩·국가명·형태소 bold 예시 추가
-  - `getText()` fallback 개선: Korean strip → Latin 단어 추출
+- [x] Prompt Caching 적용 (fixed_prefix ephemeral) — 2026-03-03
+- [x] "Lost in the Middle" 프롬프트 구조 개선 — 2026-03-03
+- [x] LLM-as-Judge 평가 시스템 구축 (6규칙, 83→90%) — 2026-03-03
+- [x] User Feedback UI (👍/👎) — 2026-03-04
+- [x] Monitoring 강화 (token_count, rag_hit 실기록) — 2026-03-04
+- [x] 서버 기반 PDF 저장 + ChatPDF 레이아웃 — 2026-03-10
+- [x] PDF 주석 (sticky notes, 하이라이트) — 2026-03-11
+- [x] PDF별 언어 선택 + TTS 연동 — 2026-03-11
 
 ---
 
-## v0.3 — 진행 중 / 남은 작업
+## Phase 1: 독일어 전용 코드 제거 — 범용 기반 구축 ✅
+
+> 목표: 독일어 하드코딩 전부 제거. PDF 중심 아키텍처로 전환.
+> 완료일: 2026-03-11
+
+### Backend 제거/수정
+
+- [x] **prompts.py 전면 재작성** — 범용 `build_system_prompt(language, learner_language, rag_chunks)`
+- [x] **units.py 제거** — 1,000+ lines 삭제
+- [x] **schemas.py 수정** — `unit_id/level/textbook_id` → `pdf_id`
+- [x] **claude_service.py 수정** — `DOKDOKDOK_A1` 제거, 범용 프롬프트 빌더 호출
+- [x] **chat.py 수정** — 대화 키 `(user, pdf_id)`, WORTLISTE 제거, RAG `pdf_id` 필터
+- [x] **repositories.py 수정** — `search_vocabulary()` 제거, 전체 repo `unit_id → pdf_id`
+- [x] **summaries.py / notes.py 라우터 수정** — `unit_id → pdf_id`
+- [x] **test_prompts.py 재작성** — 16/16 pass
+- [x] **DB 마이그레이션** — `001_unit_to_pdf.sql` (컬럼 추가 + 데이터 이관 + 구 컬럼 DROP)
+
+### Frontend 제거/수정
+
+- [x] **types.ts** — `UNITS` 배열(56개) 제거, `SavedSummary/SavedNote` → `pdfId/pdfName`
+- [x] **chat/page.tsx** — 레벨/단원 선택 제거, PDF 선택 중심
+- [x] **ChatPanel.tsx** — Props `pdfId/pdfName`, UNITS lookup 제거
+- [x] **useChat.ts** — `level` 타입 제거, `pdf_id` 전달, SUMMARY_PROMPT 범용화
+- [x] **summaries.ts / notes.ts** — API 호출 `unit_id → pdf_id`
+- [x] **API routes (summaries, notes)** — 프록시 파라미터 `pdf_id`
+- [x] **setup/page.tsx 삭제** — obsolete 단원 선택 페이지
+- [x] **page.tsx (랜딩)** → `/chat` 리다이렉트로 단순화
+
+### Scripts 정리
+
+- [ ] **evaluate.py: 독일어 규칙 제거** — Phase 4에서 범용 eval로 재설계
+- [ ] **index_pdf.py / index_wortliste.py** — Phase 2에서 API 엔드포인트로 대체
 
 ---
 
-## 단기 (Medium effort / High impact)
+## Phase 2: PDF 업로드 → 자동 인덱싱 (RAG 핵심)
 
-- [x] **User Feedback UI** — v0.3 Phase 2 — 2026-03-04
-  - 응답 하단 thumbs up/down UI (isSummary 제외, 토글 지원)
-  - backend: `PATCH /api/messages/{id}/feedback` + messages 테이블 feedback 컬럼
-  - 목적: eval 결과와 사용자 체감 품질 상관관계 확인
+> 목표: 유저가 PDF를 업로드하면 자동으로 RAG 인덱싱 완료.
+> 이것이 범용 서비스의 핵심 기능.
 
-- [x] **Monitoring 강화** (Ch. 10) — 2026-03-04
-  - `messages.token_count` 실기록 (output_tokens from Claude API usage)
-  - `messages.rag_hit` BOOLEAN 추가 — 단원별 RAG 히트율 추적 가능
-  - 로그: `Token usage — unit=%s out=%d in=%d cache_read=%d cache_write=%d`
-  - 변경 파일: `claude_service.py`, `chat.py`, `repositories.py`, `schema.sql`
+- [ ] **POST /api/pdfs/{id}/index 엔드포인트**
+  - 트리거: PDF 업로드 직후 (또는 수동 호출)
+  - 플로우:
+    1. Supabase Storage에서 PDF 다운로드
+    2. PyMuPDF로 텍스트 추출 (페이지별)
+    3. 청킹 (페이지 기반, 또는 문단 기반)
+    4. OpenAI embedding batch 호출
+    5. `document_chunks` 저장 (pdf_id, page_number, content, embedding)
+  - 비동기 처리: FastAPI `BackgroundTasks`
+  - 인덱싱 상태: `pdf_files` 테이블에 `index_status` 컬럼 추가
+    - `pending` → `indexing` → `ready` → `failed`
 
-- [ ] **P0-1: german_bold_complete 프롬프트 개선** — Eval 이터레이션 2라운드
-  - 실패 패턴 5종 확인: 형태소(`ge-`/`-en`), 변환 표기(`ein → kein`), 언어학 용어(`Dativ`), 팁 섹션
-  - `prompts.py` ANSWER_FORMAT에 이 패턴들의 명시적 예시 추가
-  - 목표: 40% → 70%+ 달성
-  - 변경 파일: `backend/app/data/prompts.py`, `scripts/evaluate.py` 재실행
+- [ ] **인덱싱 상태 UI**
+  - PDF 목록에서 인덱싱 상태 표시
+  - `ready` 전까지 "AI 질문" 비활성화 또는 경고
 
-- [ ] **P0-2: Eval v2 — 의미론적 규칙 추가**
-  - 현재 eval은 포맷 준수율만 측정. "좋은 튜터인가?"는 미측정
-  - 추가 규칙: `correct_level` (A1 수준 적합성), `example_relevance` (예문-문법 연관성)
-  - 변경 파일: `scripts/evaluate.py`, `scripts/test_questions.json`
+- [ ] **RAG 검색 로직 수정**
+  - `chat.py`: `pdf_id`로 해당 PDF의 chunks만 검색
+  - Vision + RAG 병행 전략:
+    - `page_image` 있으면 → RAG는 다른 페이지에서만 검색 (중복 방지)
+    - `page_image` 없으면 → RAG 전체 검색
 
-- [ ] **P1-1: GitHub Actions eval CI 파이프라인**
-  - 트리거: push to main (backend/ 변경 시)
-  - 5개 핵심 질문 실행 (비용 절감), 점수 < 85% 시 경고
-  - 변경 파일: `.github/workflows/eval.yml` (신규), `scripts/evaluate.py` (--questions 옵션)
-
-- [ ] **Multi-turn Query Rewriting** — v0.3 Phase 3 (RAG 재활성화 후)
-  - "이 문장 다시 설명해줘" 같은 후속 질문을 독립 문장으로 재작성 후 RAG 검색
-  - 방식: 경량 Claude 호출 or 템플릿 기반 컨텍스트 주입
-  - 변경 파일: `chat.py`, `embedding_service.py`
-  - 전제 조건: `RAG_ENABLED=True` 복원 후
+- [ ] **청킹 전략**
+  - 기본: 페이지 기반 (1페이지 = 1청크, 간단하고 메타데이터 매핑 쉬움)
+  - 긴 페이지: 문단 분할 (token 수 기준)
+  - 메타데이터: `{ page_number, pdf_id }`
 
 ---
 
-## 중기 (Strategic value)
+## Phase 3: UX 정리
 
-- [ ] **P3: 피드백-Eval 상관관계 분석** (실사용자 피드백 20개+ 수집 후)
-  - SQL: 단원별 thumbs-up 비율 vs eval 점수 매핑
-  - 목적: "eval 수치가 실사용자 만족도를 예측하는가" 데이터 증명 (측정 루프 완결)
+> 목표: 어떤 언어 교재를 올려도 자연스럽게 동작하는 UX.
+> 범용 시스템 프롬프트는 Phase 1에서 완료.
 
-- [ ] **P4: Evaluation Framework — RAGAS** (Ch. 3-4, 실사용자 50명+ 후)
-  - context relevance, groundedness, answer relevance 3종
-  - 전제 조건: 골든 데이터셋 확보, RAG_ENABLED=True 복원
+- [x] **범용 시스템 프롬프트 설계** — Phase 1에서 완료
+  - `build_system_prompt(language, learner_language, rag_chunks)`
+  - Prompt Caching: 고정(역할+규칙) + 동적(RAG) 분리 유지
 
-- [ ] **임베딩 모델 평가** — 독일어 RAG 품질 최적화
-  - 현재: `text-embedding-3-small` (영어 위주)
-  - 비교: `multilingual-e5-large` (다국어 특화)
-  - 전제 조건: Evaluation Framework 구축 후
+- [x] **PDF 중심 UX 흐름** — Phase 1에서 완료
+  - 단원/레벨 선택 UI 제거, PDF 선택 중심
 
-- [ ] **STT 검토** — 외부 API vs Web Speech API
-  - 현재 Web Speech API는 브라우저/OS 의존성 높음
-  - 후보: OpenAI Whisper API
-
-- [ ] **Progress Tracking UX**
-  - 완료 단원 처리 방식 미결정 (버튼 vs 자동 체크)
-  - 출처: wireframe-spec.md
+- [x] **대화 모델** — Phase 1에서 완료
+  - 1 PDF = 1 대화 스레드, PDF별 분리
 
 ---
 
-## 실사용자 확보 (P2)
+## Phase 4: 실사용자 + Eval 재구축
 
-> 포트폴리오 스토리의 전제 조건. 실사용자 없이는 eval 데이터도, 피드백도 없음.
+> 목표: 범용 서비스 기반으로 실사용자 확보 + 품질 측정 재구축.
 
-- [ ] **채널 선정** — 독일어 학습 커뮤니티 1개 선택
-  - 후보: Reddit r/German, Discord 독일어 학습 서버, Naver 카페 (독일어 학습)
-  - 목표: 베타 사용자 10~20명
+- [ ] **실사용자 확보 (10-20명)**
+  - 채널: 언어학습 커뮤니티 (Reddit r/languagelearning, Discord 등)
+  - 타겟: 교재 PDF로 외국어 공부하는 사람 (독일어에 한정하지 않음)
+  - 온보딩: 소개 게시물 + in-app 피드백
 
-- [ ] **베타 온보딩**
-  - 소개 게시물 작성 + 피드백 수집 채널 마련
+- [ ] **범용 Eval 재설계**
+  - 독일어 format 규칙 대신 범용 규칙:
+    - `answer_grounded_in_pdf`: RAG 컨텍스트 기반 답변인가?
+    - `correct_language`: 학습 대상 언어로 예시를 제공하는가?
+    - `answer_completeness`: 질문에 완전히 답했는가?
+  - RAG 품질 측정: Context Precision, Context Recall
+
+- [ ] **CI/CD 파이프라인**
+  - GitHub Actions: build + lint + deploy
+  - Eval CI: 범용 테스트셋으로 품질 회귀 감지
 
 ---
 
-## 장기 / 보류
+## Phase 5: 차별화 (보너스)
 
-- [ ] **Finetuning 검토** (Ch. 7)
-  - 재검토 시점: 사용자 1,000명 이상 or A2 교재 추가 시
+- [ ] Hybrid Search (BM25 + vector) — 키워드 vs 의미 검색 결합
+- [ ] Observability (비용 대시보드, LangSmith 연동)
+- [ ] 임베딩 모델 비교 (multilingual-e5-large vs text-embedding-3-small)
+- [ ] 다국어 TTS 자동 감지 (PDF 언어 → TTS 언어 자동 설정)
 
 ---
 
@@ -122,7 +147,41 @@
 
 | 기법 | 이유 |
 |------|------|
-| Agents / ReAct (Ch. 6) | 튜터링 Q&A에 불필요한 복잡도 |
-| Semantic Caching (Ch. 10) | 저자 본인이 "가치 의심스럽다"고 결론. 히트율 불투명 |
-| 하드웨어 최적화 / KV cache (Ch. 9) | Anthropic API 사용 → 자체 인프라 없음 |
-| Model Router (Ch. 10) | 프롬프트 constraints로 충분히 처리 중 |
+| Agents / ReAct | PDF Q&A에 불필요한 복잡도. 단발성 응답 적합 |
+| Semantic Caching | 질문 다양성 높아 히트율 낮음. Prompt Caching으로 충분 |
+| Model Router | 품질 일관성 > 비용 절감 |
+| Pinecone / Weaviate | 유저당 수백 청크 수준. pgvector + SQL 필터로 충분 |
+| Finetuning | 유저별 교재가 다르므로 범용 모델이 적합 |
+
+---
+
+## 우선순위 요약
+
+```
+Phase 1: 독일어 제거 + PDF 중심 전환     ← 범용화 기반. 이것 없이는 나머지 불가
+Phase 2: PDF 업로드 → 자동 인덱싱        ← RAG 핵심. 제품의 존재 이유
+Phase 3: 범용 프롬프트 + UX              ← 어떤 언어든 동작하는 상태
+Phase 4: 실사용자 + Eval                 ← 포트폴리오 증거
+Phase 5: 차별화                          ← 보너스
+```
+
+---
+
+## 피벗으로 달라지는 포트폴리오 스토리
+
+```
+기존:
+  "독일어 RAG 튜터 → Eval 설계 → 83→90%"
+
+변경:
+  "독일어 튜터 → 아키텍처가 특정 언어에 종속됨을 인식
+   → 유저 PDF 기반 범용 서비스로 피벗
+   → RAG가 '옵션'에서 '핵심'으로 전환
+   → Hybrid Search로 검색 품질 X% 달성
+   → 실사용자 N명, 피드백 기반 개선"
+
+증명하는 역량:
+  - 제품 판단력: 시장 확장을 위한 아키텍처 피벗
+  - RAG 운영: 유저별 동적 인덱싱 + 검색
+  - E2E 소유: 혼자 기획→피벗→배포→사용자 확보
+```

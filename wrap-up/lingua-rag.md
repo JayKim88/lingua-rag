@@ -4,6 +4,242 @@
 > **Scope**: Full stack (backend + frontend + infra)
 > **Live**: https://lingua-rag.vercel.app
 
+## Session: 2026-03-11 23:33
+
+> **Context**: Phase 1 pivot — remove all German-specific code, convert unit-based architecture to PDF-based universal language tutor
+
+### Done
+- refactor(backend): **prompts.py full rewrite** — removed `TUTOR_ROLE`, `LEVEL_CONFIG`, `UNIT_SUMMARY_TABLE`, `ANSWER_FORMAT`, `_build_constraints()`; new universal `build_system_prompt(language, learner_language, rag_chunks)` with prompt caching split (fixed prefix + dynamic RAG suffix)
+- chore(backend): **units.py deleted** — removed 1,000+ lines of hardcoded German curriculum data (`DOKDOKDOK_A1`, `BAND_1~8`)
+- refactor(backend): **schemas.py** — `ChatRequest`: removed `unit_id/level/textbook_id`, added `pdf_id`; `ConversationOut`: `unit_id/level` → `pdf_id/pdf_name`; `SummaryCreate/Out`, `NoteCreate/Out`: `unit_id/unit_title` → `pdf_id/pdf_name`
+- refactor(backend): **claude_service.py** — removed `DOKDOKDOK_A1` import, calls universal `build_system_prompt_parts(language, rag_chunks)`
+- refactor(backend): **chat.py** — conversation key `(user, unit_id)` → `(user, pdf_id)`, removed WORTLISTE vocabulary search, removed A1/A2/dokdokdok-a1 defaults, RAG search uses `pdf_id` filter, resolves language from `pdf_files.language`
+- refactor(backend): **repositories.py** — `ConversationRepository.get_or_create()` uses `pdf_id`, removed `search_vocabulary()` (WORTLISTE-specific), `VectorSearchRepository.search()` uses `pdf_id` instead of `textbook_id`, `SummaryRepository`/`NoteRepository` switched to `pdf_id/pdf_name`
+- refactor(backend): **summaries.py / notes.py routers** — query param `unit_id` → `pdf_id`, response mapping `unit_id/unit_title` → `pdf_id/pdf_name`
+- test(backend): **test_prompts.py rewritten** — 16 tests covering tutor role, answer format, constraints, RAG injection, prompt caching split; all 16 pass
+- refactor(backend): **config.py** — `RAG_ENABLED` default changed from `False` to `True` (RAG is now core, not optional)
+- feat(db): **001_unit_to_pdf.sql migration** — adds `pdf_id`/`pdf_name` columns to conversations/summaries/notes/document_chunks, migrates existing data, drops old columns (`unit_id`, `textbook_id`, `level`, `unit_title`)
+- fix(db): Added `ALTER COLUMN ... DROP NOT NULL` for old columns before DROP to fix `NotNullViolationError` on INSERT
+- refactor(frontend): **types.ts** — removed `UNITS` array (56 hardcoded units), `SavedSummary`/`SavedNote` interfaces use `pdfId/pdfName`
+- refactor(frontend): **useChat.ts** — removed `level` type, `UseChatOptions` simplified to `{pdfId, getPageText}`, API body sends `pdf_id`, `SUMMARY_PROMPT` language-agnostic ("단어와 표현" instead of "독일어 단어와 표현")
+- refactor(frontend): **ChatPanel.tsx** — props `unitId/level/textbookId` → `pdfId/pdfName`, removed UNITS import, all summary/note calls use `pdfId/pdfName`
+- refactor(frontend): **chat/page.tsx** — removed level state, `textbookId` derivation, `useSearchParams`, `pdfUnitIdMap` → `pdfIdMap` (no more `pdf:` prefix), removed "레벨 재선택" menu item
+- refactor(frontend): **summaries.ts / notes.ts** — API calls use `pdf_id` query param
+- refactor(frontend): **API routes (summaries, notes)** — proxy passes `pdf_id` instead of `unit_id`
+- chore(frontend): **setup/page.tsx deleted** — obsolete unit selector page
+- refactor(frontend): **page.tsx (landing)** — replaced German level selector with simple redirect to `/chat`
+- docs: **README.md full rewrite** — updated for PDF-based architecture: new features section, architecture diagrams with `pdf_id`, DB schema with all current tables, updated user flow, project structure, API endpoints, design decisions
+- docs: **todo.md updated** — Phase 1 all items checked, Phase 3 marked as completed (done in Phase 1)
+
+### Decisions
+- DB migration strategy: add new columns → migrate data → drop old columns (not rename) to avoid implicit dependencies
+- Old German conversation data naturally orphaned (old `unit_id` values don't match new PDF UUIDs) — acceptable since it's a pivot
+- Scripts cleanup (evaluate.py, index_wortliste.py) deferred to Phase 2/4 as planned — they don't affect running app
+- `RAG_ENABLED` default flipped to `True` — RAG is now the product's core, not an optional enhancement
+
+### Issues
+- `NotNullViolationError` on `conversations.unit_id` after migration — migration added `pdf_id` but didn't drop NOT NULL on old columns; fixed by adding `ALTER COLUMN ... DROP NOT NULL` before DROP
+- POST /api/chat 500 error resolved after running the NOT NULL fix + server restart
+
+### Next
+- [ ] Phase 2: `POST /api/pdfs/{id}/index` endpoint — PDF upload → auto text extraction → chunking → embedding → `document_chunks` storage
+- [ ] Phase 2: `pdf_files.index_status` column (`pending → indexing → ready → failed`)
+- [ ] Phase 2: Indexing status UI in PDF sidebar
+- [ ] Phase 2: Chunking strategy (page-based, paragraph split for long pages)
+- [ ] Remove debug `console.log` from `PdfViewer.tsx` (from previous Next)
+- [ ] Hover popup edge positioning — viewport top overflow fallback (from previous Next)
+
+---
+
+## Session: 2026-03-11 19:04
+
+> **Context**: Language selection UX fixes (no default language on new PDF) + sticky note Windows-style redesign
+
+### Done
+- fix(pdf): No default language for new PDFs — `fetchPdfLanguage` useEffect calls `onLanguageChange(null)` before fetching; PDFs with no saved language show amber "언어 선택" instead of inheriting global TTS language from localStorage
+- fix(pdf): `onLanguageChange` prop type widened from `string` to `string | null` in `PdfViewerInner` interface (`useTTS.setLanguage` already accepted `null`)
+- fix(pdf): Sound buttons in hover/drag popups open language modal when no language set — `if (!language) { setPendingLang(null); setShowLangModal(true); return; }` guard in both popup sound button onClick handlers
+- fix(pdf): Language modal Save button disabled when no language selected (`disabled={!pendingLang && !language}`)
+- feat(pdf): Sticky note UI redesigned to Windows Sticky Notes style — colored header bar (amber/pink/green/blue), pastel body background, color swatches in header, trash/close icon in header; borderless transparent textarea directly editable
+- feat(pdf): `STICKY_COLORS` module-level constant — maps `yellow/pink/green/blue` to `{ header, body }` hex color pairs
+- feat(pdf): ESC key on sticky note textarea — dismisses edit mode (`setEditingSticky(null)`) or creation mode (`setPendingSticky(null)`)
+
+### Next
+- [x] Run Supabase SQL migration (completed — `001_unit_to_pdf.sql` covers all schema changes)
+- [ ] Test end-to-end: upload PDF → appears in sidebar → send chat → refresh → PDF selected + chat visible (from previous Next)
+- [ ] Test annotation overlay — upload PDF to server, add sticky memo, verify DB persist, reload and confirm (from previous Next)
+- [ ] Test translation button — drag German text, click "번역", verify Korean result without popup closing (from previous Next)
+- [ ] Remove debug `console.log` from `PdfViewer.tsx` (`[extract]`, `[columns]`, `[sentence]`) (from previous Next)
+- [ ] Hover popup edge positioning — viewport top overflow fallback (from previous Next)
+
+---
+
+## Session: 2026-03-11 19:03
+
+> **Context**: Chat message action bars (Copy/👍/👎/Retry/Edit), inline message editing, Supabase message truncate API, pronunciation modal symbol/number normalization fixes
+
+### Done
+- feat(chat): `AssistantActionBar` component — Copy (with 복사됨 feedback), 👍, 👎, Retry buttons below AI messages; `opacity-0 group-hover:opacity-100`
+- feat(chat): `UserActionBar` component — Retry, Edit, Copy buttons below user messages; `opacity-0 group-hover:opacity-100`
+- feat(chat): Inline message editing — Edit button shows textarea in-place with Save/Cancel; `Cmd+Enter` shortcut; `Escape` cancels
+- feat(chat): Shared icon atoms — `IconCopy`, `IconCheck`, `IconRetry`, `IconEdit`, `IconThumbUp`, `IconThumbDown`
+- refactor(chat): Removed `CopyButton` (absolute top-right in bubble) and `FeedbackButtons` (standalone below bubble); replaced with unified action bars
+- feat(chat): `retryFromMessage()` in `useChat.ts` — reads current messages via `messagesRef` (not state), removes from target message onward, returns content for resend; AI message retry removes preceding user message too
+- feat(chat): `messagesRef` — `useRef` synced to `messages` each render, enables synchronous read inside `retryFromMessage` without stale closure
+- feat(backend): `DELETE /api/messages/{id}/truncate` endpoint — deletes target message + all subsequent in same conversation; ownership verified via `user_id`
+- feat(backend): `MessageRepository.delete_from()` — SQL DELETE with `created_at >=` pivot + conversation ownership join
+- feat(frontend): Next.js proxy route `app/api/messages/[id]/truncate/route.ts`
+- feat(chat): Fire-and-forget Supabase truncate on Retry/Edit — `fetch(truncate)` with `.catch(() => {})` so DB cleanup doesn't block UX
+- fix(chat): `retryFromMessage` stale closure bug — was setting `contentToResend` inside `setMessages` updater (runs asynchronously); fixed by reading `messagesRef.current` synchronously before `setMessages`
+- fix(pdf/chat): `€`/`%`/`$`/`£`/`¥` symbol expansion in `normalize()` before stripping non-letters — fixes "1€" not matching "euro" in pronunciation practice
+- fix(chat): Number normalization — digits kept in `normalize()` regex; `NUMBER_WORDS` lookup table per language; `numericMatch()` for digit↔word comparison ("20" ↔ "zwanzig")
+- fix(chat): User message bubble `wrap-break-word` — long unbroken strings no longer overflow bubble boundary
+
+### Decisions
+- **`messagesRef` pattern over state in callbacks**: `setMessages` updater is scheduled async in React 18; to compute return values synchronously from `retryFromMessage`, a ref mirroring `messages` is the idiomatic solution.
+- **Fire-and-forget truncate**: DB cleanup is non-critical — UI updates instantly; if truncate fails, the orphaned messages in DB are invisible (history loads only up to current conversation state in next session).
+- **Inline edit → immediate sendMessage**: On Edit save, `retryFromMessage` removes messages then `sendMessage(newContent)` fires directly, not via inject-to-input. Cleaner UX matching Claude's behavior.
+
+### Issues
+- **`w-full` flex overflow on edit textarea**: `w-full` inside `flex justify-end` expanded beyond viewport. Fixed with `w-[min(80%,100%)] min-w-0 ml-auto`.
+
+### Next
+- [ ] Run Supabase SQL migration: `ALTER TABLE pdf_files ADD COLUMN IF NOT EXISTS language TEXT; ALTER TABLE pdf_files ADD COLUMN IF NOT EXISTS last_page INTEGER NOT NULL DEFAULT 1;`
+- [ ] Test end-to-end: upload PDF → appears in sidebar → send chat → refresh → PDF selected + chat visible (from previous Next)
+- [ ] Test annotation overlay — upload PDF to server, add sticky memo, verify DB persist, reload and confirm
+- [ ] Test translation button — drag German text, click "번역", verify Korean result without popup closing
+- [ ] Remove debug `console.log` from `PdfViewer.tsx` (`[extract]`, `[columns]`, `[sentence]`) (from previous Next)
+- [ ] Wire `onRetry` for assistant messages — currently `AssistantActionBar` passes `msg.backendId` but needs confirmation that retry from assistant message ID correctly finds preceding user message via `messagesRef`
+- [ ] Consider adding `NUMBER_WORDS` support for Japanese/Chinese (currently only de/en/fr/es/it/pt)
+
+---
+
+## Session: 2026-03-11 01:36
+
+> **Context**: PDF viewer multi-page scrolling, per-PDF language + last-page persistence in Supabase, loading overlay, PDF switch freeze fix, lastSavedPage optimization, scroll animation hiding
+
+### Done
+- feat(pdf): Multi-page vertical scroll — all pages rendered in scrollable column; windowed rendering (±3 pages) with placeholder divs to prevent freeze
+- feat(pdf): `IntersectionObserver` — tracks most-visible page in scroll area; updates `pageNumber` state
+- fix(pdf): PDF switch freeze — `key={file.name}` on `<Document>` forces remount + cancels old render; windowed rendering limits concurrent canvas count
+- feat(pdf): Per-PDF language saved to Supabase `pdf_files.language` — auto-loaded on PDF open, applied to TTS + PronunciationModal
+- feat(pdf): Multi-language TTS — `useTTS` refactored from German-only to 9-language; `TTS_LANGUAGES` constant; `language: null` state means not selected; `speak()` no-ops if language null
+- feat(pdf): Language selector in PDF viewer header — amber button when not selected; modal with 9-language grid, X button, Save button, no outside-click-close; `pendingLang` staging state
+- feat(pdf): Per-PDF last-page saved to Supabase `pdf_files.last_page` — auto-saved on page change (1.5s debounce); restored on PDF reopen
+- feat(pdf): Loading overlay — spinner shown until page restore complete; prevents page-1 flicker before scrolling to saved page
+- fix(pdf): `lastSavedPageRef` — tracks server-confirmed last page; skips PATCH `/last-page` if `pageNumber` unchanged
+- fix(pdf): Scroll hidden during restore — `scrollToPage(page, true)` uses `behavior: "instant"`; page navigation buttons keep `"auto"`
+- fix(pdf): IntersectionObserver blocked during loading — `pdfReadyRef` synced from `pdfReady` state; observer skips `setPageNumber` while `!pdfReadyRef.current`; prevents toolbar showing 39→40 during restore
+- feat(backend): `GET/PATCH /pdfs/{id}/language` endpoints in `pdfs.py`
+- feat(backend): `GET/PATCH /pdfs/{id}/last-page` endpoints in `pdfs.py`
+- feat(backend): `PdfFileRepository.update_language`, `update_last_page` methods
+- feat(frontend): Next.js proxy routes — `app/api/pdfs/[id]/language/route.ts`, `app/api/pdfs/[id]/last-page/route.ts`
+- feat(frontend): `lib/annotations.ts` — added `fetchPdfLanguage`, `savePdfLanguage`, `fetchLastPage`, `saveLastPage`
+
+### Decisions
+- **Windowed rendering ±3**: Rendering all pages simultaneously caused browser freeze on PDF switch. ±3 window balances scroll smoothness vs. memory.
+- **`key={file.name}` on `<Document>`**: Forces react-pdf to fully unmount/remount on PDF change, cancelling in-flight canvas renders cleanly.
+- **`pdfReadyRef` instead of `pdfReady` in observer**: IntersectionObserver callbacks are async; reading `pdfReady` state directly gives stale closure. Ref stays current without re-subscribing the observer.
+- **`behavior: "instant"` only for restore**: Page navigation buttons keep default scroll behavior; instant only used during initial page restore to avoid visible scroll animation under the overlay.
+
+### Issues
+- **Overlay didn't hide scroll jump**: Overlay covered PDF area but toolbar (outside scroll area) showed page number changing (39→40). Fixed by gating IntersectionObserver on `pdfReadyRef`.
+
+### Next
+- [ ] Run Supabase SQL migration: `ALTER TABLE pdf_files ADD COLUMN IF NOT EXISTS language TEXT; ALTER TABLE pdf_files ADD COLUMN IF NOT EXISTS last_page INTEGER NOT NULL DEFAULT 1;`
+- [ ] Test end-to-end: upload PDF → appears in sidebar → send chat → refresh → PDF selected + chat visible (from previous Next)
+- [ ] Test annotation overlay — upload PDF to server, add sticky memo, verify DB persist, reload and confirm
+- [ ] Test translation button — drag German text, click "번역", verify Korean result without popup closing
+- [ ] Fix hover useEffect dependency: `[]` → `[file]` so listener attaches after PDF loads (from previous Next)
+- [ ] Remove debug `console.log` from `PdfViewer.tsx` (`[extract]`, `[columns]`, `[sentence]`) (from previous Next)
+- [ ] Hover popup edge positioning — viewport top overflow fallback (from previous Next)
+
+---
+
+## Session: 2026-03-11 01:14
+
+> **Context**: Sticky memo annotation overlay + PDF text selection popup translation + multi-page drag fix + TTS popup persistence + chat error DB save
+
+### Done
+- feat(pdf): Annotation overlay in `PdfViewer.tsx` — 📌 pins positioned by `x_pct`/`y_pct`, edit popover, pending sticky form on page click
+- feat(pdf): `useImperativeHandle` expose `getPdfId: () => serverId` for parent access
+- feat(pdf): Annotation load `useEffect` — `fetchAnnotations(serverId)` on `serverId` change; all annotations fetched at once, filtered client-side per page
+- feat(pdf): Sticky memo toolbar button (visible only when `serverId` is set)
+- refactor(pdf): Rename note → sticky — `isNoteMode` → `isStickyMode`, `pendingNote` → `pendingSticky`, `editingNote` → `editingSticky`, etc.
+- feat(pdf): "번역" button in inline selection popup — MyMemory API (`de|ko`); result row below buttons; `onMouseLeave` suppressed during fetch and while result is shown
+- fix(pdf): Popup centered on mouse X — `left: popup.x, transform: "translateX(-50%)"` replacing right-align
+- fix(pdf): Multi-page drag/selection broken after multi-page render refactor — `findTextLayer(node)` helper using `querySelectorAll(".react-pdf__Page__textContent")` + containment check; applied across all 6+ call sites (`handleMouseDown`, `handleMouseMoveDrag`, `handleMouseUp`, `handleDblClick`, hover handler, `computeRangeRects`)
+- fix(pdf): TTS popup stays open while speaking — `onMouseLeave` checks `window.speechSynthesis.speaking`; popup persists until audio ends then closes on next mouse-out
+- fix(layout): `suppressHydrationWarning` on `<body>` — resolves browser extension `cz-shortcut-listen` attribute hydration mismatch
+- fix(chat): Save Claude error messages to DB — `event["type"] == "error"` branch calls `msg_repo.create()` before SSE yield; `except Exception` handler also saves generic error message with nested try/except protecting SSE delivery
+- feat(backend): `AnnotationRepository` — `list_by_page`, `list_all`, `create`, `update`, `delete` in `repositories.py`
+- feat(backend): Annotation CRUD endpoints in `pdfs.py` — `GET/POST /{pdf_id}/annotations`, `PATCH/DELETE /{pdf_id}/annotations/{ann_id}`; `list_annotations` optional `page_num` query param
+- feat(frontend): `frontend/lib/annotations.ts` — `fetchAnnotations`, `createAnnotation`, `updateAnnotation`, `deleteAnnotation`
+- feat(frontend): Next.js proxy routes — `app/api/pdfs/[id]/annotations/route.ts` (GET + POST), `[id]/annotations/[annId]/route.ts` (PATCH + DELETE)
+
+### Decisions
+- **`findTextLayer` over `querySelector`**: Multi-page render (`Array.from({length:numPages}).map(n => <Page>)`) renders all pages simultaneously. `querySelector` returns only the first text layer. Fix: `querySelectorAll` + `Array.from().find(l => l.contains(node))` pinpoints the correct layer per event target.
+- **`window.speechSynthesis.speaking` check**: TTS `isSpeaking` state lives in `useTTS` hook. Rather than threading the prop down, read the browser API directly in `onMouseLeave` — zero prop interface changes.
+- **Single PDF-level annotation fetch**: Fetch all annotations once on `serverId` change, filter per-page client-side. Avoids N per-page requests on page navigation.
+
+### Issues
+- **TypeScript `textLayer` undefined after refactor**: `handleMouseMoveDrag` referenced `textLayer` variable after inline refactor removed it — fixed by re-adding `const textLayer = findTextLayer(startCaret.startContainer)`
+- **`onMouseLeave` closing popup during translation**: Async `fetch` in translate handler was racing with `onMouseLeave` — fixed by adding `isTranslating` state + checking it in `onMouseLeave`
+
+### Next
+- [ ] Test end-to-end: upload PDF → appears in sidebar → send chat → refresh → PDF selected + chat visible (from previous Next)
+- [ ] Test annotation overlay — upload PDF to server, add sticky memo, verify DB persist, reload and confirm
+- [ ] Test translation button — drag German text, click "번역", verify Korean result without popup closing
+- [x] Fix hover useEffect dependency: `[]` → `[file]` — N/A: entire hover detection system removed (from previous Next)
+- [ ] Remove debug `console.log` from `PdfViewer.tsx` (`[extract]`, `[columns]`, `[sentence]`) (from previous Next)
+- [x] Hover popup edge positioning — hover popup system fully removed; selection popup replaces it (from previous Next)
+- [ ] Consider migrating to `@react-pdf-viewer/core` for better scaleX transform handling
+
+---
+
+## Session: 2026-03-11 01:13
+
+> **Context**: Supabase Storage migration (local filesystem → cloud), PDF metadata DB table, chat persistence fix (unitId drift + refresh state restore), annotation batch fetch
+
+### Done
+- feat(backend): `app/core/storage.py` — new async Supabase Storage client (httpx); `storage_upload`, `storage_download`, `storage_signed_url`, `storage_delete`; bucket `pdfs`, path `{user_id}/{pdf_id}.pdf`
+- feat(backend): `SUPABASE_SERVICE_ROLE_KEY` field added to `Settings` class in `config.py`
+- feat(backend): `PdfFileRepository` added to `repositories.py` — `create`, `list_by_user`, `get`, `delete` against `pdf_files` DB table
+- feat(backend): `AnnotationRepository.list_all()` — fetch all annotations for a PDF without `page_num` filter (ordered by page_num, created_at ASC)
+- refactor(backend): `pdfs.py` — full rewrite; filesystem replaced with Supabase Storage; metadata moved from JSON sidecars to `pdf_files` table; `serve_pdf` returns 302 redirect to signed URL; `GET /pdfs/{id}/page/{n}/image` and `/text` download from Storage then process with PyMuPDF
+- feat(backend): `GET /pdfs/{id}/annotations` — `page_num` query param now optional; omit to return all annotations
+- chore(backend): `requirements.txt` — added `PyMuPDF>=1.24.0`
+- fix(frontend): `annotations.ts` — `fetchAnnotations(pdfId)` no longer takes `pageNum`; fetches all annotations in one request
+- fix(frontend): `PdfViewer.tsx` — replaced `Promise.all(Array(numPages)…)` (N requests per page) with single `useEffect` on `serverId` change; batch fetch all annotations at once
+- fix(frontend): `pdfLibrary.ts` — `getLibraryMeta()` was stripping `serverId` field in `.map()`; fixed by spreading `serverId` conditionally; added `seen` Set deduplication to prevent duplicate entries
+- feat(frontend): `page.tsx` — `pdfUnitIdMap = useRef<Map<string,string>>` locks unitId at first visit to prevent mid-session drift when `pdfLibrary` state updates after server fetch
+- feat(frontend): `page.tsx` — init `useEffect` restores `activePdfName`, `visitedPdfs`, `pdfUnitIdMap` from `LIBRARY_CURRENT_KEY` so PDF selection persists across refresh
+- fix(frontend): `page.tsx` — after upload completes, `pdfUnitIdMap.current.set(name, "pdf:{uuid}")` so current session uses stable uuid-based key (not temporary `pdf:{filename}` key)
+- fix(db): `ALTER TABLE conversations ALTER COLUMN unit_id TYPE TEXT` — was `VARCHAR(10)`, too short for `pdf:{uuid}` (40 chars)
+- chore(db): `pdf_files` table created in Supabase with `id TEXT PRIMARY KEY`, `user_id UUID`, `name TEXT`, `size BIGINT`, `total_pages INTEGER`, `created_at TIMESTAMPTZ`
+
+### Decisions
+- **Supabase Storage over S3/R2**: Project already uses Supabase for auth + DB; using Supabase Storage avoids adding a new vendor. Service role key bypasses RLS for server-side operations. No SDK dependency needed — direct httpx calls to Storage REST API.
+- **Signed URL redirect (302) over streaming**: `serve_pdf` creates a 1-hour signed URL and returns a redirect. Avoids proxying PDF bytes through the backend; browser fetches directly from Supabase CDN.
+- **`pdfUnitIdMap` ref over derived state**: unitId computed from `pdfLibrary` state caused drift when async server sync updated `serverId` mid-session. Ref locked at first visit is immune to state updates.
+- **Batch annotation fetch**: One `GET /pdfs/{id}/annotations` call vs. N calls (one per page). Backend returns all annotations sorted by page; frontend filters client-side when needed.
+
+### Issues
+- **`ValidationError: SUPABASE_SERVICE_ROLE_KEY Extra inputs not permitted`**: `storage.py` initially used `os.environ` directly instead of pydantic `settings`, then key was not declared in `Settings` class → fixed both
+- **`StringDataRightTruncationError VARCHAR(10)`**: `conversations.unit_id` was `VARCHAR(10)`; new format `pdf:{uuid}` = 40 chars → required `ALTER TABLE` migration
+- **`zsh: 1.24.0 not found` on pip install**: Shell misinterpreted `>=` as redirect. Correct: `pip install "PyMuPDF>=1.24.0"` (quoted)
+- **Old chat history orphaned**: Conversations stored under old `unitId` format (before this session) cannot be recovered as keys have changed. Users should re-upload PDFs for clean state.
+
+### Next
+- [ ] Test end-to-end: upload PDF → appears in sidebar → send chat → refresh → PDF selected + chat visible
+- [ ] Clean up `backend/uploads/` directory (old local files no longer used)
+- [ ] Fix hover useEffect dependency: `[]` → `[file]` so listener attaches after PDF loads
+- [ ] Fix double-click word selection — `handleDblClick` with `findCaretAt` + `wordBoundaries`
+- [ ] Remove debug `console.log` from `PdfViewer.tsx` (`[extract]`, `[columns]`, `[sentence]`)
+- [ ] Hover popup edge positioning — viewport top overflow fallback
+
+---
+
 ## Session: 2026-03-10 22:54
 
 > **Context**: PDF viewer UX fixes (scroll animation, floating toolbar) + page image → "이 페이지" trigger-based text extraction refactor

@@ -11,10 +11,10 @@ export async function GET(request: NextRequest) {
 
   if (!session) return NextResponse.json({ summaries: [] }, { status: 401 });
 
-  const unitId = request.nextUrl.searchParams.get("unit_id") ?? "";
+  const pdfId = request.nextUrl.searchParams.get("pdf_id") ?? "";
   try {
     const res = await fetch(
-      `${BACKEND_URL}/api/summaries?unit_id=${encodeURIComponent(unitId)}`,
+      `${BACKEND_URL}/api/summaries?pdf_id=${encodeURIComponent(pdfId)}`,
       { headers: { Authorization: `Bearer ${session.access_token}` } }
     );
     const data = await res.json();

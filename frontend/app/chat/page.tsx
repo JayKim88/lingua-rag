@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense, useState, useEffect, useRef, useCallback } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import ChatPanel from "@/components/ChatPanel";
 import SaveToPageModal, { type SaveResult } from "@/components/SaveToPageModal";
@@ -15,7 +15,9 @@ import {
   deletePdfFromLibrary,
   removeLibraryMeta,
   setLibraryMetaServerId,
+  upsertLibraryMeta,
   LIBRARY_META_KEY,
+  LIBRARY_CURRENT_KEY,
   type PdfMeta,
 } from "@/lib/pdfLibrary";
 import {
@@ -47,14 +49,11 @@ const SIDEBAR_DEFAULT = 240;
 type ViewMode = "both" | "pdf" | "chat";
 
 function ChatContent() {
-  const searchParams = useSearchParams();
   const router = useRouter();
-  const unitParam = searchParams.get("unit");
-  const levelParam = searchParams.get("level") as "A1" | "A2" | null;
-
   const [initialized, setInitialized] = useState(false);
-  const [level] = useState<"A1" | "A2">("A1");
   const [visitedPdfs, setVisitedPdfs] = useState<Set<string>>(new Set());
+  // pdfId is fixed at the moment a PDF is first visited — prevents mid-session drift
+  const pdfIdMap = useRef<Map<string, string>>(new Map());
   const [viewMode, setViewMode] = useState<ViewMode>("chat");
   const [showSidebar, setShowSidebar] = useState(true);
   const [showPdfModal, setShowPdfModal] = useState(false);
@@ -62,6 +61,7 @@ function ChatContent() {
   const [openFile, setOpenFile] = useState<File | null>(null);
   const [activePdfName, setActivePdfName] = useState<string | null>(null);
   const [pdfLibrary, setPdfLibrary] = useState<PdfMeta[]>([]);
+  const [parentServerId, setParentServerId] = useState<string | null>(null);
   const modalFileInputRef = useRef<HTMLInputElement>(null);
 
   // Folders / tree state
@@ -103,7 +103,7 @@ function ChatContent() {
   const sidebarDragStartWidth = useRef(0);
 
   const healthStatus = useBackendHealth();
-  const { speak, volume, setVolume, rate, setRate, language, setLanguage } = useTTS();
+  const { speak, speakWithOptions, volume, setVolume, rate, setRate, language, setLanguage } = useTTS();
   const [showSoundModal, setShowSoundModal] = useState(false);
   const [draftVolume, setDraftVolume] = useState(volume);
   const [draftRate, setDraftRate] = useState(rate);
@@ -122,8 +122,19 @@ function ChatContent() {
     }
 
     // Load PDF library (sorted by registration order asc) and tree
-    setPdfLibrary(getLibraryMeta().sort((a, b) => a.addedAt - b.addedAt));
+    const library = getLibraryMeta().sort((a, b) => a.addedAt - b.addedAt);
+    setPdfLibrary(library);
     setTreeNodes(loadTree());
+
+    // Restore last active PDF (PdfViewer restores the file itself via IDB)
+    const lastPdfName = localStorage.getItem(LIBRARY_CURRENT_KEY);
+    if (lastPdfName && library.some((m) => m.name === lastPdfName)) {
+      const lastMeta = library.find((m) => m.name === lastPdfName);
+      pdfIdMap.current.set(lastPdfName, `${lastMeta?.serverId ?? lastPdfName}`);
+      setActivePdfName(lastPdfName);
+      setVisitedPdfs(new Set([lastPdfName]));
+      if (!savedViewMode || savedViewMode === "chat") setViewMode("both");
+    }
 
     setInitialized(true);
 
@@ -363,8 +374,6 @@ function ChatContent() {
 
   // ── Derived state ────────────────────────────────────────────────────────
 
-  const textbookId = level === "A2" ? "dokdokdok-a2" : "dokdokdok-a1";
-
   const initials =
     user?.name
       .split(" ")
@@ -396,6 +405,9 @@ function ChatContent() {
     }
 
     if (!f) return;
+    if (!pdfIdMap.current.has(meta.name)) {
+      pdfIdMap.current.set(meta.name, `${meta.serverId ?? meta.name}`);
+    }
     setOpenFile(f);
     setActivePdfName(meta.name);
     setSelectedPageNode(null);
@@ -549,20 +561,6 @@ function ChatContent() {
                     소리 설정
                   </button>
                   <button
-                    onClick={() => {
-                      setShowUserMenu(false);
-                      localStorage.removeItem("lingua_unit");
-                      localStorage.removeItem("lingua_level");
-                      router.push("/");
-                    }}
-                    className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 rounded-lg transition-colors flex items-center gap-2"
-                  >
-                    <svg className="w-3.5 h-3.5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-                    </svg>
-                    레벨 재선택
-                  </button>
-                  <button
                     onClick={handleSignOut}
                     className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded-lg transition-colors"
                   >
@@ -599,12 +597,12 @@ function ChatContent() {
                 Chats
               </div>
               <div className="overflow-y-auto max-h-52 space-y-0.5">
-                {pdfLibrary.length === 0 ? (
+                {pdfLibrary.filter((m) => m.serverId).length === 0 ? (
                   <p className="text-xs text-gray-300 px-1.5 py-3 text-center leading-relaxed">
                     PDF를 추가해보세요
                   </p>
                 ) : (
-                  pdfLibrary.map((meta) => (
+                  pdfLibrary.filter((m) => m.serverId).map((meta) => (
                     <div
                       key={meta.name}
                       className={`group flex items-center rounded-md transition-colors ${
@@ -737,10 +735,12 @@ function ChatContent() {
                 onTextSelect={setInjectText}
                 onPageChange={() => setHasPdfContext(true)}
                 speak={speak}
+                speakWithOptions={speakWithOptions}
                 language={language}
                 onLanguageChange={setLanguage}
                 openFile={openFile}
                 onClose={() => setViewMode("chat")}
+                parentServerId={parentServerId}
               />
             )}
           </main>
@@ -771,8 +771,7 @@ function ChatContent() {
             {/* Persistent chat panels — one per visited PDF */}
             {initialized &&
               [...visitedPdfs].map((pdfName) => {
-                const meta = pdfLibrary.find((m) => m.name === pdfName);
-                const unitId = `pdf:${meta?.serverId ?? pdfName}`;
+                const pdfId = pdfIdMap.current.get(pdfName) ?? pdfName;
                 return (
                   <div
                     key={pdfName}
@@ -780,9 +779,8 @@ function ChatContent() {
                     style={{ display: pdfName === activePdfName ? undefined : "none" }}
                   >
                     <ChatPanel
-                      unitId={unitId}
-                      level={level}
-                      textbookId={textbookId}
+                      pdfId={pdfId}
+                      pdfName={pdfName}
                       injectText={injectText}
                       getPageText={async () => pdfViewerRef.current?.getPageText() ?? null}
                       hasPdfContext={hasPdfContext}
@@ -909,13 +907,40 @@ function ChatContent() {
                 onChange={(e) => {
                   const f = e.target.files?.[0];
                   if (!f) return;
+                  upsertLibraryMeta(f);
+                  savePdfToLibrary(f).catch(() => {});
+                  // Fix pdfId before adding to visitedPdfs (use filename if no serverId yet)
+                  const existingMeta = getLibraryMeta().find((m) => m.name === f.name);
+                  if (!pdfIdMap.current.has(f.name)) {
+                    pdfIdMap.current.set(f.name, `${existingMeta?.serverId ?? f.name}`);
+                  }
                   setOpenFile(f);
                   setActivePdfName(f.name);
+                  setParentServerId(null);
                   setSelectedPageNode(null);
                   setViewMode("both");
                   setVisitedPdfs((prev) => new Set([...prev, f.name]));
                   setShowPdfModal(false);
                   e.target.value = "";
+                  // Upload to server — update library when done
+                  if (!existingMeta?.serverId) {
+                    const formData = new FormData();
+                    formData.append("file", f);
+                    fetch("/api/pdfs", { method: "POST", body: formData })
+                      .then((r) => (r.ok ? r.json() : null))
+                      .then((data) => {
+                        if (data?.id) {
+                          setLibraryMetaServerId(f.name, data.id);
+                          // Update pdfId map so current session uses the stable uuid-based key
+                          pdfIdMap.current.set(f.name, `${data.id}`);
+                          setParentServerId(data.id);
+                          setPdfLibrary(getLibraryMeta().sort((a, b) => a.addedAt - b.addedAt));
+                        }
+                      })
+                      .catch(() => {});
+                  } else {
+                    setParentServerId(existingMeta.serverId ?? null);
+                  }
                 }}
               />
               <button
@@ -945,6 +970,9 @@ function ChatContent() {
                         onClick={async () => {
                           const f = await loadPdfFromLibrary(meta.name);
                           if (!f) return;
+                          if (!pdfIdMap.current.has(meta.name)) {
+                            pdfIdMap.current.set(meta.name, `${meta.serverId ?? meta.name}`);
+                          }
                           setOpenFile(f);
                           setActivePdfName(meta.name);
                           setSelectedPageNode(null);

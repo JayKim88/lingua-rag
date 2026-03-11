@@ -267,36 +267,169 @@ export const MARKDOWN_COMPONENTS: Partial<Components> = {
 };
 
 // ---------------------------------------------------------------------------
-// User-message copy button
+// Shared icon atoms
 // ---------------------------------------------------------------------------
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
+function IconCopy({ className = "w-4 h-4" }: { className?: string }) {
   return (
-    <button
-      onClick={() =>
-        navigator.clipboard.writeText(text).then(() => {
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1500);
-        })
-      }
-      className="opacity-0 group-hover:opacity-100 transition-opacity absolute top-2 right-2 text-blue-200 hover:text-white p-1 rounded"
-      title="복사"
-    >
-      {copied ? (
-        <span className="text-[10px] font-medium text-green-300">복사됨</span>
-      ) : (
-        <svg
-          className="w-3.5 h-3.5"
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke="currentColor"
-          strokeWidth={2}
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </svg>
+  );
+}
+function IconCheck({ className = "w-4 h-4" }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+    </svg>
+  );
+}
+function IconRetry({ className = "w-4 h-4" }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+    </svg>
+  );
+}
+function IconEdit({ className = "w-4 h-4" }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+    </svg>
+  );
+}
+function IconThumbUp({ filled = false, className = "w-4 h-4" }: { filled?: boolean; className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill={filled ? "currentColor" : "none"} stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5" />
+    </svg>
+  );
+}
+function IconThumbDown({ filled = false, className = "w-4 h-4" }: { filled?: boolean; className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill={filled ? "currentColor" : "none"} stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M10 14H5.236a2 2 0 01-1.789-2.894l3.5-7A2 2 0 018.736 3h4.018a2 2 0 01.485.06l3.76.94m-7 10v5a2 2 0 002 2h.096c.5 0 .905-.405.905-.904 0-.715.211-1.413.608-2.008L17 13V4m-7 10h2m5-10h2a2 2 0 012 2v6a2 2 0 01-2 2h-2.5" />
+    </svg>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Assistant message action bar — Copy + 👍 + 👎 + Retry
+// ---------------------------------------------------------------------------
+function AssistantActionBar({
+  content,
+  messageId,
+  feedback,
+  onFeedback,
+  onRetry,
+}: {
+  content: string;
+  messageId?: string;
+  feedback?: "up" | "down" | null;
+  onFeedback?: (id: string, f: "up" | "down" | null) => void;
+  onRetry?: (id: string) => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const btnBase = "h-8 w-8 rounded-md flex items-center justify-center transition-colors";
+
+  const toggleFeedback = (val: "up" | "down") => {
+    if (!messageId || !onFeedback) return;
+    onFeedback(messageId, feedback === val ? null : val);
+  };
+
+  return (
+    <div className="flex items-center gap-0.5 mt-1 opacity-0 group-hover:opacity-100 transition-opacity">
+      {/* Copy */}
+      <button
+        onClick={() =>
+          navigator.clipboard.writeText(content).then(() => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          })
+        }
+        title={copied ? "복사됨" : "복사"}
+        className={`${btnBase} ${copied ? "text-green-600" : "text-gray-400 hover:text-gray-700 hover:bg-gray-100"}`}
+      >
+        {copied ? <IconCheck /> : <IconCopy />}
+      </button>
+      {/* Thumbs up */}
+      {messageId && onFeedback && (
+        <button
+          onClick={() => toggleFeedback("up")}
+          title="도움이 됐어요"
+          className={`${btnBase} ${feedback === "up" ? "text-blue-600" : "text-gray-400 hover:text-gray-700 hover:bg-gray-100"}`}
         >
-          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-        </svg>
+          <IconThumbUp filled={feedback === "up"} />
+        </button>
       )}
-    </button>
+      {/* Thumbs down */}
+      {messageId && onFeedback && (
+        <button
+          onClick={() => toggleFeedback("down")}
+          title="도움이 안 됐어요"
+          className={`${btnBase} ${feedback === "down" ? "text-red-500" : "text-gray-400 hover:text-gray-700 hover:bg-gray-100"}`}
+        >
+          <IconThumbDown filled={feedback === "down"} />
+        </button>
+      )}
+      {/* Retry */}
+      {onRetry && messageId && (
+        <button
+          onClick={() => onRetry(messageId)}
+          title="다시 생성"
+          className={`${btnBase} text-gray-400 hover:text-gray-700 hover:bg-gray-100`}
+        >
+          <IconRetry />
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// User message action bar — Retry + Edit + Copy
+// ---------------------------------------------------------------------------
+function UserActionBar({
+  content,
+  messageId,
+  onRetry,
+  onEditClick,
+  canEdit,
+}: {
+  content: string;
+  messageId?: string;
+  onRetry?: (id: string) => void;
+  onEditClick?: () => void;
+  canEdit?: boolean;
+}) {
+  const [copied, setCopied] = useState(false);
+  const btnBase = "h-8 w-8 rounded-md flex items-center justify-center transition-colors text-gray-400 hover:text-gray-600 hover:bg-gray-200";
+
+  return (
+    <div className="flex items-center justify-end gap-0.5 mt-1 opacity-0 group-hover:opacity-100 transition-opacity">
+      {onRetry && messageId && (
+        <button onClick={() => onRetry(messageId)} title="다시 보내기" className={btnBase}>
+          <IconRetry />
+        </button>
+      )}
+      {canEdit && onEditClick && (
+        <button onClick={onEditClick} title="편집" className={btnBase}>
+          <IconEdit />
+        </button>
+      )}
+      <button
+        onClick={() =>
+          navigator.clipboard.writeText(content).then(() => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          })
+        }
+        title={copied ? "복사됨" : "복사"}
+        className={`${btnBase} ${copied ? "text-green-600 hover:text-green-600" : ""}`}
+      >
+        {copied ? <IconCheck /> : <IconCopy />}
+      </button>
+    </div>
   );
 }
 
@@ -401,73 +534,6 @@ function SaveSummaryButton({
 }
 
 // ---------------------------------------------------------------------------
-// FeedbackButtons — thumbs up/down shown below assistant messages
-// ---------------------------------------------------------------------------
-function FeedbackButtons({
-  messageId,
-  feedback,
-  onFeedback,
-}: {
-  messageId: string;
-  feedback?: "up" | "down" | null;
-  onFeedback: (id: string, f: "up" | "down" | null) => void;
-}) {
-  const toggle = (val: "up" | "down") =>
-    onFeedback(messageId, feedback === val ? null : val);
-
-  return (
-    <div className="flex items-center gap-1 mt-1.5">
-      <button
-        onClick={() => toggle("up")}
-        title="도움이 됐어요"
-        className={`p-1 rounded transition-colors ${
-          feedback === "up"
-            ? "text-blue-600"
-            : "text-gray-300 hover:text-blue-400"
-        }`}
-      >
-        <svg
-          className="w-3.5 h-3.5"
-          viewBox="0 0 24 24"
-          fill={feedback === "up" ? "currentColor" : "none"}
-          stroke="currentColor"
-          strokeWidth={2}
-        >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5"
-          />
-        </svg>
-      </button>
-      <button
-        onClick={() => toggle("down")}
-        title="도움이 안 됐어요"
-        className={`p-1 rounded transition-colors ${
-          feedback === "down"
-            ? "text-red-500"
-            : "text-gray-300 hover:text-red-400"
-        }`}
-      >
-        <svg
-          className="w-3.5 h-3.5"
-          viewBox="0 0 24 24"
-          fill={feedback === "down" ? "currentColor" : "none"}
-          stroke="currentColor"
-          strokeWidth={2}
-        >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            d="M10 14H5.236a2 2 0 01-1.789-2.894l3.5-7A2 2 0 018.736 3h4.018a2 2 0 01.485.06l3.76.94m-7 10v5a2 2 0 002 2h.096c.5 0 .905-.405.905-.904 0-.715.211-1.413.608-2.008L17 13V4m-7 10h2m5-10h2a2 2 0 012 2v6a2 2 0 01-2 2h-2.5"
-          />
-        </svg>
-      </button>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // MessageList
 // ---------------------------------------------------------------------------
 interface MessageListProps {
@@ -477,6 +543,8 @@ interface MessageListProps {
   onPractice: (text: string) => void;
   onSaveSummary?: (content: string) => void;
   onFeedback?: (messageId: string, feedback: "up" | "down" | null) => void;
+  onRetry?: (messageId: string) => void;
+  onEdit?: (messageId: string, content: string) => void;
 }
 
 export default function MessageList({
@@ -486,7 +554,11 @@ export default function MessageList({
   onPractice,
   onSaveSummary,
   onFeedback,
+  onRetry,
+  onEdit,
 }: MessageListProps) {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingContent, setEditingContent] = useState("");
   const [selectionPopup, setSelectionPopup] = useState<{
     x: number;
     y: number;
@@ -640,17 +712,69 @@ export default function MessageList({
                       </svg>
                       대화 요약 요청
                     </div>
+                  ) : editingId === msg.id ? (
+                    // ── Inline edit mode ──────────────────────────────────
+                    <div className="w-[min(80%,100%)] min-w-0 ml-auto">
+                      <textarea
+                        autoFocus
+                        value={editingContent}
+                        onChange={(e) => setEditingContent(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Escape") setEditingId(null);
+                          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                            if (editingContent.trim() && onEdit) {
+                              onEdit(msg.id, editingContent.trim());
+                              setEditingId(null);
+                            }
+                          }
+                        }}
+                        rows={Math.max(2, editingContent.split("\n").length)}
+                        className="w-full rounded-2xl px-4 py-3 text-sm leading-relaxed border-2 border-blue-400 outline-none resize-none bg-white text-gray-800 shadow-sm"
+                      />
+                      <div className="flex items-center justify-end gap-2 mt-2">
+                        <button
+                          onClick={() => setEditingId(null)}
+                          className="px-3 py-1.5 text-xs rounded-lg text-gray-500 hover:bg-gray-100 transition-colors"
+                        >
+                          취소
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (editingContent.trim() && onEdit) {
+                              onEdit(msg.id, editingContent.trim());
+                              setEditingId(null);
+                            }
+                          }}
+                          disabled={!editingContent.trim()}
+                          className="px-3 py-1.5 text-xs rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 transition-colors"
+                        >
+                          저장
+                        </button>
+                      </div>
+                    </div>
                   ) : (
-                    <div className="relative group max-w-[75%] rounded-2xl px-4 py-3 text-sm leading-relaxed bg-blue-600 text-white rounded-br-sm">
-                      <p className="whitespace-pre-wrap">{msg.content}</p>
+                    // ── Normal bubble ─────────────────────────────────────
+                    <div className="flex flex-col items-end group">
+                      <div className="max-w-[75%] rounded-2xl px-4 py-3 text-sm leading-relaxed bg-blue-600 text-white rounded-br-sm">
+                        <p className="whitespace-pre-wrap wrap-break-word">{msg.content}</p>
+                      </div>
                       {!msg.isStreaming && msg.content && (
-                        <CopyButton text={msg.content} />
+                        <UserActionBar
+                          content={msg.content}
+                          messageId={msg.id}
+                          onRetry={onRetry}
+                          canEdit={!!onEdit}
+                          onEditClick={() => {
+                            setEditingId(msg.id);
+                            setEditingContent(msg.content);
+                          }}
+                        />
                       )}
                     </div>
                   )}
                 </div>
               ) : (
-                <div className="flex flex-col items-start">
+                <div className="group flex flex-col items-start">
                   <div
                     className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed rounded-bl-sm shadow-sm ${
                       msg.isSummary
@@ -682,16 +806,15 @@ export default function MessageList({
                       />
                     )}
                   </div>
-                  {!msg.isStreaming &&
-                    !msg.isSummary &&
-                    msg.backendId &&
-                    onFeedback && (
-                      <FeedbackButtons
-                        messageId={msg.backendId}
-                        feedback={msg.feedback}
-                        onFeedback={onFeedback}
-                      />
-                    )}
+                  {!msg.isStreaming && !msg.isSummary && (
+                    <AssistantActionBar
+                      content={msg.content}
+                      messageId={msg.backendId}
+                      feedback={msg.feedback}
+                      onFeedback={onFeedback}
+                      onRetry={onRetry}
+                    />
+                  )}
                 </div>
               )}
             </div>

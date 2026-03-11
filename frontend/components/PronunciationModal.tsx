@@ -32,12 +32,72 @@ function levenshtein(a: string, b: string): number {
   return dp[m][n];
 }
 
-function normalize(s: string): string[] {
-  return s
+// Language-aware symbol → word expansion before stripping non-letters
+const SYMBOL_MAP: Record<string, Record<string, string>> = {
+  "%": {
+    "de-DE": "prozent", "de-AT": "prozent", "de-CH": "prozent",
+    "en-US": "percent", "en-GB": "percent",
+    "fr-FR": "pour cent",
+    "es-ES": "por ciento",
+    "it-IT": "percento",
+    "pt-BR": "por cento",
+    "ja-JP": "パーセント",
+    "zh-CN": "百分之",
+  },
+  "€": { default: "euro" },
+  "$": {
+    "en-US": "dollar", "en-GB": "dollar", "pt-BR": "dólar",
+    "es-ES": "dólar", "it-IT": "dollaro", "fr-FR": "dollar",
+    "de-DE": "dollar", "de-AT": "dollar", "de-CH": "dollar",
+    default: "dollar",
+  },
+  "£": { default: "pound" },
+  "¥": { "ja-JP": "えん", "zh-CN": "元", default: "yen" },
+};
+
+function expandSymbols(s: string, lang: string): string {
+  let result = s;
+  for (const [sym, map] of Object.entries(SYMBOL_MAP)) {
+    const word = map[lang] ?? map["default"] ?? Object.values(map)[0];
+    result = result.replace(new RegExp(sym.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"), ` ${word} `);
+  }
+  return result;
+}
+
+function normalize(s: string, lang = "de-DE"): string[] {
+  return expandSymbols(s, lang)
     .toLowerCase()
-    .replace(/[^a-zA-ZÀ-ÖØ-öø-ÿ\s]/g, "")
+    // Keep digits as tokens alongside letters
+    .replace(/[^a-zA-ZÀ-ÖØ-öø-ÿ\u3040-\u30FF\u4E00-\u9FFF0-9\s]/g, "")
     .split(/\s+/)
     .filter(Boolean);
+}
+
+// Basic number-word lookup for STT word→digit matching (STT often returns digits)
+const NUMBER_WORDS: Record<string, Record<string, number>> = {
+  "de-DE": { null: 0, eins: 1, ein: 1, eine: 1, zwei: 2, zwo: 2, drei: 3, vier: 4, fünf: 5, sechs: 6, sieben: 7, acht: 8, neun: 9, zehn: 10, elf: 11, zwölf: 12, dreizehn: 13, vierzehn: 14, fünfzehn: 15, sechzehn: 16, siebzehn: 17, achtzehn: 18, neunzehn: 19, zwanzig: 20, dreißig: 30, vierzig: 40, fünfzig: 50, sechzig: 60, siebzig: 70, achtzig: 80, neunzig: 90, hundert: 100 },
+  "en-US": { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90, hundred: 100 },
+  "fr-FR": { zéro: 0, un: 1, deux: 2, trois: 3, quatre: 4, cinq: 5, six: 6, sept: 7, huit: 8, neuf: 9, dix: 10, onze: 11, douze: 12, treize: 13, quatorze: 14, quinze: 15, seize: 16, vingt: 20, trente: 30, quarante: 40, cinquante: 50, soixante: 60, cent: 100 },
+  "es-ES": { cero: 0, uno: 1, una: 1, dos: 2, tres: 3, cuatro: 4, cinco: 5, seis: 6, siete: 7, ocho: 8, nueve: 9, diez: 10, once: 11, doce: 12, trece: 13, catorce: 14, quince: 15, veinte: 20, treinta: 30, cuarenta: 40, cincuenta: 50, sesenta: 60, setenta: 70, ochenta: 80, noventa: 90, cien: 100 },
+  "it-IT": { zero: 0, uno: 1, una: 1, due: 2, tre: 3, quattro: 4, cinque: 5, sei: 6, sette: 7, otto: 8, nove: 9, dieci: 10, undici: 11, dodici: 12, tredici: 13, quattordici: 14, quindici: 15, venti: 20, trenta: 30, quaranta: 40, cinquanta: 50, sessanta: 60, settanta: 70, ottanta: 80, novanta: 90, cento: 100 },
+  "pt-BR": { zero: 0, um: 1, uma: 1, dois: 2, duas: 2, três: 3, quatro: 4, cinco: 5, seis: 6, sete: 7, oito: 8, nove: 9, dez: 10, onze: 11, doze: 12, treze: 13, catorze: 14, quinze: 15, vinte: 20, trinta: 30, quarenta: 40, cinquenta: 50, sessenta: 60, setenta: 70, oitenta: 80, noventa: 90, cem: 100 },
+};
+NUMBER_WORDS["en-GB"] = NUMBER_WORDS["en-US"];
+NUMBER_WORDS["de-AT"] = NUMBER_WORDS["de-DE"];
+NUMBER_WORDS["de-CH"] = NUMBER_WORDS["de-DE"];
+
+// Match a recognized word against an expected token, handling digit↔word equivalence
+function numericMatch(recognized: string, expected: string, lang: string): boolean {
+  if (recognized === expected) return true;
+  const map = NUMBER_WORDS[lang];
+  if (!map) return false;
+  // recognized is a word, expected is a digit
+  if (/^\d+$/.test(expected) && map[recognized] !== undefined)
+    return map[recognized] === Number(expected);
+  // recognized is a digit, expected is a word
+  if (/^\d+$/.test(recognized) && map[expected] !== undefined)
+    return Number(recognized) === map[expected];
+  return false;
 }
 
 function fuzzyMatch(a: string, b: string): boolean {
@@ -50,7 +110,7 @@ function fuzzyMatch(a: string, b: string): boolean {
 // PronunciationModal
 // ---------------------------------------------------------------------------
 export default function PronunciationModal({ text, speak, onClose, lang = "de-DE" }: Props) {
-  const origWords = useMemo(() => normalize(text), [text]);
+  const origWords = useMemo(() => normalize(text, lang), [text, lang]);
 
   const [phase, setPhase] = useState<Phase>("listening");
   const [matchedCount, setMatchedCount] = useState(0);
@@ -108,7 +168,7 @@ export default function PronunciationModal({ text, speak, onClose, lang = "de-DE
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const t = Array.from(e.results).map((r: any) => r[0].transcript).join(" ");
       setTranscript(t);
-      const newWords = normalize(t);
+      const newWords = normalize(t, lang);
       const prev = prevTransWordsRef.current;
       let current = matchedCountRef.current;
       let wrongWord = false;
@@ -118,7 +178,7 @@ export default function PronunciationModal({ text, speak, onClose, lang = "de-DE
         for (const word of newWords.slice(prev.length)) {
           const expected = origWords[current];
           if (!expected) break;
-          if (fuzzyMatch(word, expected)) {
+          if (fuzzyMatch(word, expected) || numericMatch(word, expected, lang)) {
             current++;
             isNewSessionRef.current = false;
           } else if (current > 0 && !isNewSessionRef.current) {
@@ -138,7 +198,7 @@ export default function PronunciationModal({ text, speak, onClose, lang = "de-DE
         for (let i = 0; i < newWords.length; i++) {
           const expected = origWords[current];
           if (!expected) break;
-          if (fuzzyMatch(newWords[i], expected)) current++;
+          if (fuzzyMatch(newWords[i], expected) || numericMatch(newWords[i], expected, lang)) current++;
           else break;
         }
       }

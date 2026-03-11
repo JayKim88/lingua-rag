@@ -21,7 +21,6 @@ import anthropic
 
 from app.core.config import settings
 from app.data.prompts import build_system_prompt_parts
-from app.data.units import DOKDOKDOK_A1
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +39,7 @@ class ClaudeService:
         self,
         user_message: str,
         history: list[dict[str, Any]],
-        unit_id: str,
-        level: str,
-        textbook_id: str,
+        language: str = "독일어",
         rag_chunks: list[str] | None = None,
         page_image: str | None = None,
         page_text: str | None = None,
@@ -53,29 +50,20 @@ class ClaudeService:
         Implements:
         - Auto-retry with exponential backoff (FR-4)
         - Truncation detection (EC-3)
-        - Out-of-level question rejection (FR-4)
 
         Args:
             user_message: The user's current question.
             history: List of {role, content} dicts (last 10 messages).
-            unit_id: Current unit (e.g. "A1-3").
-            level: "A1" or "A2".
-            textbook_id: e.g. "dokdokdok-a1".
+            language: Target language being learned (e.g. "독일어").
+            rag_chunks: Retrieved PDF chunks for context.
 
         Yields:
             Dict events with "type" key.
         """
-        unit_data = DOKDOKDOK_A1.get(unit_id) if textbook_id == "dokdokdok-a1" else None
         fixed_prefix, dynamic_suffix = build_system_prompt_parts(
-            level=level, unit_id=unit_id, unit_data=unit_data
+            language=language,
+            rag_chunks=rag_chunks,
         )
-
-        if rag_chunks:
-            joined = "\n\n---\n\n".join(rag_chunks)
-            # Prepend RAG context so it appears immediately after the cached prefix.
-            # The model attends most to the start/end of context ("Lost in the Middle",
-            # Liu et al. 2023) — placing retrieval chunks first maximises recall.
-            dynamic_suffix = f"## 교재 원문 참고\n\n{joined}\n\n" + dynamic_suffix
 
         # System prompt as two blocks: cacheable prefix + dynamic suffix.
         # The fixed_prefix (~1,300 tokens) is identical across same-level requests

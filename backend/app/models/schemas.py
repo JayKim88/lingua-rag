@@ -15,17 +15,9 @@ class ChatRequest(BaseModel):
     """Request body for POST /api/chat."""
 
     message: str = Field(..., min_length=1, max_length=2000, description="User's question")
-    unit_id: Optional[str] = Field(
-        default="A1-1",
-        description="Current unit ID (e.g. 'A1-3'). Defaults to A1-1.",
-    )
-    level: Optional[Literal["A1", "A2"]] = Field(
-        default="A1",
-        description="CEFR level of the learner.",
-    )
-    textbook_id: Optional[str] = Field(
-        default="dokdokdok-a1",
-        description="Textbook identifier.",
+    pdf_id: Optional[str] = Field(
+        default=None,
+        description="Server-side PDF file ID. Used to scope conversation and RAG search.",
     )
     force_new_conversation: Optional[bool] = Field(
         default=False,
@@ -41,10 +33,8 @@ class ChatRequest(BaseModel):
     )
 
     model_config = {"json_schema_extra": {"example": {
-        "message": "sein 동사의 현재형 변화를 알려주세요",
-        "unit_id": "A1-2",
-        "level": "A1",
-        "textbook_id": "dokdokdok-a1",
+        "message": "이 페이지의 문법을 설명해주세요",
+        "pdf_id": "abc-123",
         "force_new_conversation": False,
     }}}
 
@@ -65,9 +55,8 @@ class ConversationOut(BaseModel):
 
     id: UUID
     session_id: UUID
-    unit_id: str
-    textbook_id: str
-    level: str
+    pdf_id: Optional[str] = None
+    pdf_name: Optional[str] = None
     created_at: str
     updated_at: str
 
@@ -88,8 +77,8 @@ class MessagesResponse(BaseModel):
 class SummaryCreate(BaseModel):
     """Request body for POST /api/summaries."""
 
-    unit_id: str = Field(..., max_length=50)
-    unit_title: str = Field(..., max_length=255)
+    pdf_id: str = Field(..., max_length=255)
+    pdf_name: str = Field(..., max_length=255)
     content: str = Field(..., min_length=1)
 
 
@@ -97,8 +86,8 @@ class SummaryOut(BaseModel):
     """A single summary record."""
 
     id: UUID
-    unit_id: str
-    unit_title: str
+    pdf_id: str
+    pdf_name: str
     content: str
     saved_at: str
 
@@ -112,8 +101,8 @@ class SummaryListResponse(BaseModel):
 class NoteCreate(BaseModel):
     """Request body for POST /api/notes."""
 
-    unit_id: str = Field(..., max_length=50)
-    unit_title: str = Field(..., max_length=255)
+    pdf_id: str = Field(..., max_length=255)
+    pdf_name: str = Field(..., max_length=255)
     content: str = Field(..., min_length=1)
 
 
@@ -121,8 +110,8 @@ class NoteOut(BaseModel):
     """A single note record."""
 
     id: UUID
-    unit_id: str
-    unit_title: str
+    pdf_id: str
+    pdf_name: str
     content: str
     saved_at: str
 

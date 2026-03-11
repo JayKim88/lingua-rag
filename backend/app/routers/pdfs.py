@@ -1,31 +1,34 @@
 """PDF storage and serving endpoints.
 
-Uploaded PDFs are stored on the server filesystem under
-  uploads/pdfs/{user_id}/{pdf_id}.pdf
-with a JSON sidecar  uploads/pdfs/{user_id}/{pdf_id}.json  for metadata.
+Uploaded PDFs are stored in Supabase Storage:
+  bucket: pdfs
+  path:   {user_id}/{pdf_id}.pdf
 
+Metadata is persisted in the pdf_files table (PostgreSQL via asyncpg).
 All write/delete operations require a valid JWT.
-File serve and page-image endpoints also require auth (called via Next.js proxy).
 """
 
-import base64
-import json
 import logging
-import time
 import uuid as uuid_mod
-from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
 import fitz  # PyMuPDF
+import base64
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
-from app.db.repositories import AnnotationRepository
+from app.core.storage import object_path, storage_upload, storage_download, storage_signed_url, storage_delete
+from app.db.repositories import AnnotationRepository, PdfFileRepository
 from app.deps.auth import get_current_user
 
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/pdfs")
+
 ann_repo = AnnotationRepository()
+pdf_repo = PdfFileRepository()
 
 
 class AnnotationCreate(BaseModel):
@@ -37,51 +40,22 @@ class AnnotationCreate(BaseModel):
 
 
 class AnnotationUpdate(BaseModel):
-    text: str
-    color: str
-
-logger = logging.getLogger(__name__)
-
-router = APIRouter(prefix="/pdfs")
-
-UPLOAD_DIR = Path("uploads/pdfs")
+    text: str | None = None
+    color: str | None = None
+    x_pct: float | None = None
+    y_pct: float | None = None
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _user_dir(user_id: str) -> Path:
-    d = UPLOAD_DIR / user_id
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+class LanguageUpdate(BaseModel):
+    language: str | None = None
 
 
-def _pdf_path(user_id: str, pdf_id: str) -> Path:
-    return _user_dir(user_id) / f"{pdf_id}.pdf"
-
-
-def _meta_path(user_id: str, pdf_id: str) -> Path:
-    return _user_dir(user_id) / f"{pdf_id}.json"
-
-
-def _read_meta(user_id: str, pdf_id: str) -> dict | None:
-    p = _meta_path(user_id, pdf_id)
-    if not p.exists():
-        return None
-    return json.loads(p.read_text())
-
-
-def _assert_owns(user_id: str, pdf_id: str) -> Path:
-    """Return pdf path if it exists and is owned by user, else raise 404."""
-    path = _pdf_path(user_id, pdf_id)
-    if not path.exists():
-        raise HTTPException(404, "PDF not found")
-    return path
+class LastPageUpdate(BaseModel):
+    last_page: int
 
 
 # ---------------------------------------------------------------------------
-# Endpoints
+# PDF endpoints
 # ---------------------------------------------------------------------------
 
 @router.post("/upload")
@@ -95,13 +69,9 @@ async def upload_pdf(
 
     pdf_id = str(uuid_mod.uuid4())
     user_id = str(user)
-
     content = await file.read()
 
-    pdf_path = _pdf_path(user_id, pdf_id)
-    pdf_path.write_bytes(content)
-
-    # Get page count with PyMuPDF
+    # Get page count
     total_pages = 0
     try:
         doc = fitz.open(stream=content, filetype="pdf")
@@ -110,28 +80,89 @@ async def upload_pdf(
     except Exception:
         logger.warning("Could not read page count for %s", pdf_id)
 
-    meta = {
-        "id": pdf_id,
-        "name": file.filename or "document.pdf",
-        "size": len(content),
-        "total_pages": total_pages,
-        "created_at": time.time(),
-    }
-    _meta_path(user_id, pdf_id).write_text(json.dumps(meta))
+    # Upload to Supabase Storage
+    path = object_path(user_id, pdf_id)
+    try:
+        await storage_upload(path, content)
+    except Exception:
+        logger.exception("Storage upload failed for %s", pdf_id)
+        raise HTTPException(500, "Failed to store PDF")
 
-    return meta
+    # Save metadata to DB
+    meta = await pdf_repo.create(user, pdf_id, file.filename or "document.pdf", len(content), total_pages)
+
+    return {
+        "id": meta["id"],
+        "name": meta["name"],
+        "size": meta["size"],
+        "total_pages": meta["total_pages"],
+        "language": meta.get("language"),
+        "created_at": meta["created_at"].timestamp() if hasattr(meta["created_at"], "timestamp") else meta["created_at"],
+    }
 
 
 @router.get("")
 async def list_pdfs(user: Annotated[UUID, Depends(get_current_user)]):
-    user_dir = _user_dir(str(user))
-    metas = []
-    for p in user_dir.glob("*.json"):
-        try:
-            metas.append(json.loads(p.read_text()))
-        except Exception:
-            pass
-    return sorted(metas, key=lambda m: m.get("created_at", 0), reverse=True)
+    metas = await pdf_repo.list_by_user(user)
+    return [
+        {
+            "id": m["id"],
+            "name": m["name"],
+            "size": m["size"],
+            "total_pages": m["total_pages"],
+            "language": m.get("language"),
+            "created_at": m["created_at"].timestamp() if hasattr(m["created_at"], "timestamp") else m["created_at"],
+        }
+        for m in metas
+    ]
+
+
+@router.get("/{pdf_id}/language")
+async def get_pdf_language(
+    pdf_id: str,
+    user: Annotated[UUID, Depends(get_current_user)],
+):
+    meta = await pdf_repo.get(user, pdf_id)
+    if not meta:
+        raise HTTPException(404, "PDF not found")
+    return {"language": meta.get("language")}
+
+
+@router.patch("/{pdf_id}/language")
+async def update_pdf_language(
+    pdf_id: str,
+    body: LanguageUpdate,
+    user: Annotated[UUID, Depends(get_current_user)],
+):
+    meta = await pdf_repo.get(user, pdf_id)
+    if not meta:
+        raise HTTPException(404, "PDF not found")
+    await pdf_repo.update_language(user, pdf_id, body.language)
+    return {"language": body.language}
+
+
+@router.get("/{pdf_id}/last-page")
+async def get_last_page(
+    pdf_id: str,
+    user: Annotated[UUID, Depends(get_current_user)],
+):
+    meta = await pdf_repo.get(user, pdf_id)
+    if not meta:
+        raise HTTPException(404, "PDF not found")
+    return {"last_page": meta.get("last_page", 1) or 1}
+
+
+@router.patch("/{pdf_id}/last-page")
+async def update_last_page(
+    pdf_id: str,
+    body: LastPageUpdate,
+    user: Annotated[UUID, Depends(get_current_user)],
+):
+    meta = await pdf_repo.get(user, pdf_id)
+    if not meta:
+        raise HTTPException(404, "PDF not found")
+    await pdf_repo.update_last_page(user, pdf_id, max(1, body.last_page))
+    return {"last_page": body.last_page}
 
 
 @router.get("/{pdf_id}/file")
@@ -139,15 +170,18 @@ async def serve_pdf(
     pdf_id: str,
     user: Annotated[UUID, Depends(get_current_user)],
 ):
-    path = _assert_owns(str(user), pdf_id)
-    return FileResponse(
-        path,
-        media_type="application/pdf",
-        headers={
-            "Content-Disposition": "inline",
-            "Cache-Control": "private, max-age=3600",
-        },
-    )
+    meta = await pdf_repo.get(user, pdf_id)
+    if not meta:
+        raise HTTPException(404, "PDF not found")
+
+    path = object_path(str(user), pdf_id)
+    try:
+        signed_url = await storage_signed_url(path)
+    except Exception:
+        logger.exception("Failed to create signed URL for %s", pdf_id)
+        raise HTTPException(500, "Failed to serve PDF")
+
+    return RedirectResponse(url=signed_url, status_code=302)
 
 
 @router.get("/{pdf_id}/page/{page_num}/image")
@@ -156,10 +190,18 @@ async def get_page_image(
     page_num: int,
     user: Annotated[UUID, Depends(get_current_user)],
 ):
-    path = _assert_owns(str(user), pdf_id)
+    meta = await pdf_repo.get(user, pdf_id)
+    if not meta:
+        raise HTTPException(404, "PDF not found")
+
+    path = object_path(str(user), pdf_id)
+    try:
+        content = await storage_download(path)
+    except Exception:
+        raise HTTPException(500, "Failed to fetch PDF from storage")
 
     try:
-        doc = fitz.open(str(path))
+        doc = fitz.open(stream=content, filetype="pdf")
         if page_num < 1 or page_num > len(doc):
             raise HTTPException(400, f"Page {page_num} out of range (1–{len(doc)})")
         page = doc[page_num - 1]
@@ -181,10 +223,18 @@ async def get_page_text(
     page_num: int,
     user: Annotated[UUID, Depends(get_current_user)],
 ):
-    path = _assert_owns(str(user), pdf_id)
+    meta = await pdf_repo.get(user, pdf_id)
+    if not meta:
+        raise HTTPException(404, "PDF not found")
+
+    path = object_path(str(user), pdf_id)
+    try:
+        content = await storage_download(path)
+    except Exception:
+        raise HTTPException(500, "Failed to fetch PDF from storage")
 
     try:
-        doc = fitz.open(str(path))
+        doc = fitz.open(stream=content, filetype="pdf")
         if page_num < 1 or page_num > len(doc):
             raise HTTPException(400, f"Page {page_num} out of range (1–{len(doc)})")
         page = doc[page_num - 1]
@@ -203,41 +253,29 @@ async def delete_pdf(
     pdf_id: str,
     user: Annotated[UUID, Depends(get_current_user)],
 ):
-    user_id = str(user)
-    # Verify ownership
-    _assert_owns(user_id, pdf_id)
-    for ext in (".pdf", ".json"):
-        p = _user_dir(user_id) / f"{pdf_id}{ext}"
-        if p.exists():
-            p.unlink()
+    meta = await pdf_repo.get(user, pdf_id)
+    if not meta:
+        raise HTTPException(404, "PDF not found")
+
+    path = object_path(str(user), pdf_id)
+    await storage_delete(path)
+    await pdf_repo.delete(user, pdf_id)
     return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
 # Annotation endpoints
-# SQL migration (run once in Supabase SQL editor):
-#   CREATE TABLE IF NOT EXISTS pdf_annotations (
-#     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-#     user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-#     pdf_id TEXT NOT NULL,
-#     page_num INTEGER NOT NULL,
-#     x_pct REAL NOT NULL,
-#     y_pct REAL NOT NULL,
-#     text TEXT NOT NULL,
-#     color TEXT NOT NULL DEFAULT 'yellow',
-#     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-#   );
-#   CREATE INDEX IF NOT EXISTS idx_pdf_annotations_user_pdf_page
-#     ON pdf_annotations(user_id, pdf_id, page_num);
 # ---------------------------------------------------------------------------
 
 @router.get("/{pdf_id}/annotations")
 async def list_annotations(
     pdf_id: str,
-    page_num: int = Query(...),
-    user: Annotated[UUID, Depends(get_current_user)] = None,
+    user: Annotated[UUID, Depends(get_current_user)],
+    page_num: int | None = Query(default=None),
 ):
-    return await ann_repo.list_by_page(user, pdf_id, page_num)
+    if page_num is not None:
+        return await ann_repo.list_by_page(user, pdf_id, page_num)
+    return await ann_repo.list_all(user, pdf_id)
 
 
 @router.post("/{pdf_id}/annotations")
@@ -258,7 +296,11 @@ async def update_annotation(
     body: AnnotationUpdate,
     user: Annotated[UUID, Depends(get_current_user)],
 ):
-    result = await ann_repo.update(user, ann_id, body.text, body.color)
+    result = await ann_repo.update(
+        user, ann_id,
+        text=body.text, color=body.color,
+        x_pct=body.x_pct, y_pct=body.y_pct,
+    )
     if not result:
         raise HTTPException(404, "Annotation not found")
     return result

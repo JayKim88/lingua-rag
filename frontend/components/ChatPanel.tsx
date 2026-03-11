@@ -8,7 +8,7 @@ import MessageList, { ChatActionsCtx, MARKDOWN_COMPONENTS } from "./MessageList"
 import PronunciationModal from "./PronunciationModal";
 import InputBar from "./InputBar";
 import { useChat } from "@/hooks/useChat";
-import { UNITS, SavedSummary, SavedNote } from "@/lib/types";
+import { SavedSummary, SavedNote } from "@/lib/types";
 import {
   getSummaries,
   saveSummary,
@@ -19,9 +19,8 @@ import { getNotes, saveNote, deleteNote } from "@/lib/notes";
 import { patchFeedback } from "@/lib/feedback";
 
 interface ChatPanelProps {
-  unitId: string;
-  level: "A1" | "A2";
-  textbookId: string;
+  pdfId: string;
+  pdfName: string;
   injectText?: { text: string; id: number };
   getPageText?: () => Promise<string | null>;
   hasPdfContext?: boolean;
@@ -30,19 +29,16 @@ interface ChatPanelProps {
 }
 
 export default function ChatPanel({
-  unitId,
-  level,
-  textbookId,
+  pdfId,
+  pdfName,
   injectText,
   getPageText,
   hasPdfContext,
   speak,
   onSaveToPage,
 }: ChatPanelProps) {
-  const { messages, isStreaming, isLoadingHistory, queueSize, sendMessage, sendSummary, cancelMessage, updateFeedback } =
-    useChat({ unitId, level, textbookId, getPageText });
-
-  const unitTitle = UNITS.find((u) => u.id === unitId)?.title ?? unitId;
+  const { messages, isStreaming, isLoadingHistory, queueSize, sendMessage, sendSummary, cancelMessage, updateFeedback, retryFromMessage } =
+    useChat({ pdfId, getPageText });
 
   // Local inject triggered by "use in input" action button on a message
   const [localInject, setLocalInject] = useState<
@@ -64,9 +60,9 @@ export default function ChatPanel({
   const [selectedSummary, setSelectedSummary] = useState<SavedSummary | null>(null);
 
   const reloadSummaries = useCallback(async () => {
-    const data = await getSummaries(unitId);
+    const data = await getSummaries(pdfId);
     setSummaries(data);
-  }, [unitId]);
+  }, [pdfId]);
 
   useEffect(() => {
     reloadSummaries();
@@ -75,14 +71,14 @@ export default function ChatPanel({
   const handleSaveSummary = useCallback(
     async (content: string) => {
       try {
-        await saveSummary({ unitId, unitTitle, content });
+        await saveSummary({ pdfId, pdfName, content });
         await reloadSummaries();
         onSaveToPage?.(content);
       } catch {
         // optimistic UI feedback already shown in SaveSummaryButton
       }
     },
-    [unitId, unitTitle, reloadSummaries, onSaveToPage]
+    [pdfId, pdfName, reloadSummaries, onSaveToPage]
   );
 
   const handleDeleteSummary = useCallback(
@@ -102,9 +98,9 @@ export default function ChatPanel({
   const [selectedNote, setSelectedNote] = useState<SavedNote | null>(null);
 
   const reloadNotes = useCallback(async () => {
-    const data = await getNotes(unitId);
+    const data = await getNotes(pdfId);
     setNotes(data);
-  }, [unitId]);
+  }, [pdfId]);
 
   useEffect(() => {
     reloadNotes();
@@ -148,14 +144,14 @@ export default function ChatPanel({
     if (!trimmed) return;
     setIsSavingMemo(true);
     try {
-      await saveNote({ unitId, unitTitle, content: trimmed });
+      await saveNote({ pdfId, pdfName, content: trimmed });
       await reloadNotes();
       setShowMemoModal(false);
       onSaveToPage?.(trimmed);
     } finally {
       setIsSavingMemo(false);
     }
-  }, [memoContent, unitId, unitTitle, reloadNotes, onSaveToPage]);
+  }, [memoContent, pdfId, pdfName, reloadNotes, onSaveToPage]);
 
   // ---------------------------------------------------------------------------
   // Close overlay / send
@@ -237,7 +233,7 @@ export default function ChatPanel({
             </div>
           ) : messages.length === 0 ? (
             <div className="flex items-center justify-center h-full text-gray-400 text-sm">
-              이 단원에 대해 무엇이든 질문해보세요.
+              이 PDF에 대해 무엇이든 질문해보세요.
             </div>
           ) : (
             <MessageList
@@ -249,6 +245,14 @@ export default function ChatPanel({
               onFeedback={async (messageId, feedback) => {
                 updateFeedback(messageId, feedback);
                 await patchFeedback(messageId, feedback);
+              }}
+              onRetry={(messageId) => {
+                const content = retryFromMessage(messageId);
+                if (content) sendMessage(content);
+              }}
+              onEdit={(messageId, newContent) => {
+                retryFromMessage(messageId);
+                sendMessage(newContent);
               }}
             />
           )}
@@ -279,7 +283,7 @@ export default function ChatPanel({
               {selectedSummary || selectedNote ? (
                 <>
                   <span className="text-sm font-semibold text-gray-800">
-                    {selectedSummary?.unitTitle ?? selectedNote?.unitTitle}
+                    {selectedSummary?.pdfName ?? selectedNote?.pdfName}
                   </span>
                   <span className="text-xs text-gray-400 ml-1">
                     {formatSavedAt(selectedSummary?.savedAt ?? selectedNote?.savedAt ?? "")}
@@ -404,7 +408,7 @@ export default function ChatPanel({
                       >
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex-1 min-w-0">
-                            <p className="text-xs font-semibold text-blue-700 truncate">{s.unitTitle}</p>
+                            <p className="text-xs font-semibold text-blue-700 truncate">{s.pdfName}</p>
                             <p className="text-xs text-gray-400 mt-0.5">{formatSavedAt(s.savedAt)}</p>
                             <p className="text-xs text-gray-600 mt-1.5 line-clamp-2 leading-relaxed">
                               {s.content.replace(/#{1,3}\s*/g, "").replace(/[📚🔤📖💡]\s*/g, "").trim().slice(0, 120)}…
@@ -448,7 +452,7 @@ export default function ChatPanel({
                       >
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex-1 min-w-0">
-                            <p className="text-xs font-semibold text-blue-700 truncate">{n.unitTitle}</p>
+                            <p className="text-xs font-semibold text-blue-700 truncate">{n.pdfName}</p>
                             <p className="text-xs text-gray-400 mt-0.5">{formatSavedAt(n.savedAt)}</p>
                             <p className="text-xs text-gray-600 mt-1.5 line-clamp-2 leading-relaxed">
                               {n.content.trim().slice(0, 120)}…
@@ -497,7 +501,7 @@ export default function ChatPanel({
               autoFocus
               value={memoContent}
               onChange={(e) => setMemoContent(e.target.value)}
-              placeholder="이 단원에 대한 메모를 작성하세요..."
+              placeholder="이 PDF에 대한 메모를 작성하세요..."
               rows={5}
               className="w-full resize-none rounded-xl border border-gray-200 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent text-gray-800 placeholder-gray-300"
             />

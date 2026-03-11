@@ -7,6 +7,7 @@ import {
   useCallback,
   useImperativeHandle,
   forwardRef,
+  useMemo,
 } from "react";
 import PronunciationModal from "./PronunciationModal";
 import { TTS_LANGUAGES } from "@/hooks/useTTS";
@@ -29,6 +30,11 @@ import {
   createAnnotation,
   updateAnnotation,
   deleteAnnotation,
+  moveAnnotation,
+  fetchPdfLanguage,
+  savePdfLanguage,
+  fetchLastPage,
+  saveLastPage,
   type Annotation,
 } from "@/lib/annotations";
 
@@ -248,11 +254,6 @@ interface SelectionPopup {
   y: number;
   text: string;
 }
-interface HoverPopup {
-  x: number;
-  y: number;
-  text: string;
-}
 
 export interface PdfViewerHandle {
   getPageText: () => Promise<string | null>;
@@ -263,16 +264,42 @@ interface PdfViewerProps {
   onTextSelect: (payload: { text: string; id: number }) => void;
   onPageChange?: (pageNumber: number) => void;
   speak: (text: string) => void;
+  speakWithOptions?: (
+    text: string,
+    opts: { volume?: number; rate?: number },
+  ) => void;
   language: string | null;
-  onLanguageChange: (lang: string) => void;
+  onLanguageChange: (lang: string | null) => void;
   openFile?: File | null; // external file to open (set by parent modal)
   onClose?: () => void; // called when the viewer's close button is clicked
+  parentServerId?: string | null; // server ID set by parent after upload
 }
 
+const STICKY_COLORS: Record<string, { header: string; body: string }> = {
+  yellow: { header: "#f59e0b", body: "#fef9c3" },
+  pink:   { header: "#f472b6", body: "#fce7f3" },
+  green:  { header: "#4ade80", body: "#dcfce7" },
+  blue:   { header: "#60a5fa", body: "#dbeafe" },
+};
+
 function PdfViewerInner(
-  { onTextSelect, onPageChange, speak, language, onLanguageChange, openFile, onClose }: PdfViewerProps,
+  {
+    onTextSelect,
+    onPageChange,
+    speak,
+    speakWithOptions,
+    language,
+    onLanguageChange,
+    openFile,
+    onClose,
+    parentServerId,
+  }: PdfViewerProps,
   ref: React.ForwardedRef<PdfViewerHandle>,
 ) {
+  // Stable reference across HMR re-evaluations (avoids react-pdf "options changed" warning)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const documentOptions = useMemo(() => DOCUMENT_OPTIONS, []);
+
   const [file, setFile] = useState<File | null>(null);
   const [numPages, setNumPages] = useState<number>(0);
   const [pageNumber, setPageNumber] = useState<number>(1);
@@ -280,23 +307,61 @@ function PdfViewerInner(
   const [popup, setPopup] = useState<SelectionPopup | null>(null);
   const [popupTranslation, setPopupTranslation] = useState<string | null>(null);
   const [isTranslating, setIsTranslating] = useState(false);
-  const [hoverPopup, setHoverPopup] = useState<HoverPopup | null>(null);
+  const [showTtsPanel, setShowTtsPanel] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [tempVolume, setTempVolume] = useState(() => {
+    try {
+      const v = localStorage.getItem("tts_volume");
+      return v ? Number(v) : 0.8;
+    } catch {
+      return 0.8;
+    }
+  });
+  const [tempRate, setTempRate] = useState(() => {
+    try {
+      const v = localStorage.getItem("tts_rate");
+      return v ? Number(v) : 0.9;
+    } catch {
+      return 0.9;
+    }
+  });
   const [practicePdfText, setPracticePdfText] = useState<string | null>(null);
   const [showLangModal, setShowLangModal] = useState(false);
+  const [pendingLang, setPendingLang] = useState<string | null>(null);
   const [isRestoring, setIsRestoring] = useState(true);
   const [pageInputStr, setPageInputStr] = useState<string | null>(null);
   const [scale, setScale] = useState(1.0);
+  const [pageHeight, setPageHeight] = useState<number>(0);
+  const [pdfReady, setPdfReady] = useState(false); // true after page restore + first render
 
   // Server-side PDF ID (for annotations)
   const [serverId, setServerId] = useState<string | null>(null);
 
   // Annotation state
-  const [isNoteMode, setIsNoteMode] = useState(false);
+  const [isStickyMode, setIsStickyMode] = useState(false);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
-  const [pendingNote, setPendingNote] = useState<{ xPct: number; yPct: number } | null>(null);
-  const [editingAnnot, setEditingAnnot] = useState<Annotation | null>(null);
-  const [noteText, setNoteText] = useState("");
-  const [noteColor, setNoteColor] = useState("yellow");
+  const [pendingSticky, setPendingSticky] = useState<{
+    xPct: number;
+    yPct: number;
+  } | null>(null);
+  const [editingSticky, setEditingSticky] = useState<Annotation | null>(null);
+  const [stickyText, setStickyText] = useState("");
+  const [stickyColor, setStickyColor] = useState("yellow");
+
+  // Pin drag state
+  const pinDragRef = useRef<{
+    ann: Annotation;
+    pageEl: Element;
+    startX: number;
+    startY: number;
+    hasMoved: boolean;
+  } | null>(null);
+  const pinWasDraggedRef = useRef(false);
+  const [draggingPin, setDraggingPin] = useState<{
+    annId: string;
+    xPct: number;
+    yPct: number;
+  } | null>(null);
 
   // TOC state
   const [toc, setToc] = useState<TocItem[]>([]);
@@ -316,18 +381,19 @@ function PdfViewerInner(
 
   const pageNumberRef = useRef(pageNumber);
   pageNumberRef.current = pageNumber;
+  const scaleRef = useRef(scale);
+  scaleRef.current = scale;
+
+  const pageContainerRefs = useRef<(HTMLDivElement | null)[]>([]);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragStartPoint = useRef<{ x: number; y: number } | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const pdfDocRef = useRef<any>(null);
-  const hoverShowTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const hoverHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const popupActiveRef = useRef(false);
-  // After selection popup dismisses, block hover until mouse moves ≥ HOVER_BLOCK_DIST px
-  const hoverBlockOriginRef = useRef<{ x: number; y: number } | null>(null);
-  const HOVER_BLOCK_DIST = 50;
+  const lastPageSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSavedPageRef = useRef<number>(1);
+  const pdfReadyRef = useRef(false);
 
   // Expose imperative handle for parent to extract page text client-side
   useImperativeHandle(
@@ -351,22 +417,167 @@ function PdfViewerInner(
     [pageNumber, file, serverId],
   );
 
-  // Load annotations when serverId or page changes
+  const scrollToPage = useCallback(
+    (n: number, instant = false) => {
+      const clamped = Math.max(1, Math.min(numPages, n));
+      setPageNumber(clamped);
+      const el = pageContainerRefs.current[clamped - 1];
+      if (el)
+        el.scrollIntoView({
+          block: "start",
+          behavior: instant ? "instant" : "auto",
+        });
+    },
+    [numPages],
+  );
+
+  // Keep pdfReadyRef in sync so IntersectionObserver callback can check it without stale closure
   useEffect(() => {
-    if (!serverId) { setAnnotations([]); return; }
-    fetchAnnotations(serverId, pageNumber)
+    pdfReadyRef.current = pdfReady;
+  }, [pdfReady]);
+
+  // IntersectionObserver: update pageNumber to the most visible page
+  useEffect(() => {
+    if (numPages === 0) return;
+    const container = containerRef.current;
+    if (!container) return;
+
+    const obs = new IntersectionObserver(
+      (entries) => {
+        let best: { page: number; ratio: number } | null = null;
+        for (const entry of entries) {
+          const page = Number((entry.target as HTMLElement).dataset.page);
+          if (!best || entry.intersectionRatio > best.ratio) {
+            best = { page, ratio: entry.intersectionRatio };
+          }
+        }
+        if (best && best.ratio > 0 && pdfReadyRef.current)
+          setPageNumber(best.page);
+      },
+      {
+        root: container.querySelector(".pdf-scroll-area"),
+        threshold: Array.from({ length: 11 }, (_, i) => i / 10),
+      },
+    );
+
+    pageContainerRefs.current.forEach((el) => {
+      if (el) obs.observe(el);
+    });
+    return () => obs.disconnect();
+  }, [numPages, scale]);
+
+  // Load all annotations in a single request when serverId changes
+  useEffect(() => {
+    if (!serverId) {
+      setAnnotations([]);
+      return;
+    }
+    fetchAnnotations(serverId)
       .then(setAnnotations)
-      .catch(() => setAnnotations([]));
+      .catch(() => {});
+  }, [serverId]);
+
+  // Pin drag — move annotation to new position on mouseup
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      const drag = pinDragRef.current;
+      if (!drag) return;
+      const dx = e.clientX - drag.startX;
+      const dy = e.clientY - drag.startY;
+      if (!drag.hasMoved && (Math.abs(dx) > 5 || Math.abs(dy) > 5)) {
+        drag.hasMoved = true;
+      }
+      if (drag.hasMoved) {
+        const rect = drag.pageEl.getBoundingClientRect();
+        const xPct = Math.max(
+          0,
+          Math.min(100, ((e.clientX - rect.left) / rect.width) * 100),
+        );
+        const yPct = Math.max(
+          0,
+          Math.min(100, ((e.clientY - rect.top) / rect.height) * 100),
+        );
+        setDraggingPin({ annId: drag.ann.id, xPct, yPct });
+      }
+    };
+
+    const handleMouseUp = async (e: MouseEvent) => {
+      const drag = pinDragRef.current;
+      if (!drag) return;
+      pinDragRef.current = null;
+      if (!drag.hasMoved) {
+        setDraggingPin(null);
+        return;
+      }
+      pinWasDraggedRef.current = true;
+      const rect = drag.pageEl.getBoundingClientRect();
+      const xPct = Math.max(
+        0,
+        Math.min(100, ((e.clientX - rect.left) / rect.width) * 100),
+      );
+      const yPct = Math.max(
+        0,
+        Math.min(100, ((e.clientY - rect.top) / rect.height) * 100),
+      );
+      // Optimistic update
+      setAnnotations((prev) =>
+        prev.map((a) =>
+          a.id === drag.ann.id ? { ...a, x_pct: xPct, y_pct: yPct } : a,
+        ),
+      );
+      setDraggingPin(null);
+      if (serverId) {
+        await moveAnnotation(serverId, drag.ann.id, xPct, yPct);
+      }
+    };
+
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [serverId]);
+
+  // Load saved language for this PDF when serverId is set
+  useEffect(() => {
+    if (!serverId) return;
+    onLanguageChange(null); // Reset to null before fetching PDF-specific language
+    fetchPdfLanguage(serverId)
+      .then((lang) => {
+        if (lang) onLanguageChange(lang);
+      })
+      .catch(() => {});
+  }, [serverId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Restore last viewed page when PDF loads (serverId + numPages both ready)
+  useEffect(() => {
+    if (!serverId || numPages === 0) return;
+    fetchLastPage(serverId)
+      .then((page) => {
+        lastSavedPageRef.current = page;
+        if (page > 1) scrollToPage(page, true);
+        setPdfReady(true);
+      })
+      .catch(() => {
+        setPdfReady(true);
+      });
+  }, [serverId, numPages]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-save last page with 1.5s debounce on pageNumber change
+  useEffect(() => {
+    if (!serverId || pageNumber < 1) return;
+    if (lastPageSaveTimer.current) clearTimeout(lastPageSaveTimer.current);
+    lastPageSaveTimer.current = setTimeout(() => {
+      if (pageNumber === lastSavedPageRef.current) return;
+      saveLastPage(serverId, pageNumber).catch(() => {});
+      lastSavedPageRef.current = pageNumber;
+    }, 1500);
+    return () => {
+      if (lastPageSaveTimer.current) clearTimeout(lastPageSaveTimer.current);
+    };
   }, [serverId, pageNumber]);
 
-  // Sentence hover highlight using PDF-native coordinates from getTextContent().
-  // The text layer spans are misaligned with the canvas due to font metric
-  // approximation in PDF.js. Instead, we use the exact PDF coordinates
-  // (same data the canvas uses) and convert them via getViewport() for
-  // pixel-perfect overlays that match the canvas rendering.
-  const [highlightRects, setHighlightRects] = useState<
-    { left: number; top: number; width: number; height: number }[]
-  >([]);
   // Separate state for drag/dblclick selection highlights (persists until focus-out)
   const [selectionRects, setSelectionRects] = useState<
     { left: number; top: number; width: number; height: number }[]
@@ -375,6 +586,7 @@ function PdfViewerInner(
   // Cache: textContent items + viewport for the current page
   const textContentCache = useRef<{
     page: number;
+    scale: number;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     items: any[];
     viewport: { scale: number; width: number; height: number };
@@ -382,10 +594,15 @@ function PdfViewerInner(
     rawViewport: any;
   } | null>(null);
 
-  // Open file passed from parent (modal selection)
+  // Open file passed from parent (modal selection) — parent handles upload, skip it here
   useEffect(() => {
-    if (openFile) handleFileChange(openFile);
+    if (openFile) handleFileChange(openFile, true);
   }, [openFile]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Sync parentServerId from parent (set after parent-level upload completes)
+  useEffect(() => {
+    if (parentServerId) setServerId(parentServerId);
+  }, [parentServerId]);
 
   // Restore last-opened PDF on mount (+ restore serverId from meta)
   useEffect(() => {
@@ -500,40 +717,34 @@ function PdfViewerInner(
     };
   }, [searchQuery, numPages]);
 
-  // Keep popupActiveRef in sync so the hover effect closure sees current value.
-  // When selection popup opens: cancel any pending hover show timer + clear hover state.
-  useEffect(() => {
-    popupActiveRef.current = popup !== null;
-    if (popup !== null) {
-      if (hoverShowTimer.current) clearTimeout(hoverShowTimer.current);
-      setHoverPopup(null);
-    }
-  }, [popup]);
-
-  // Helper: clear highlight
-  const clearHighlight = useCallback(() => {
-    setHighlightRects([]);
-  }, []);
-
   // Load/cache textContent items for the current page.
   // Uses pageNumberRef to always read the current page (avoids stale closures).
   const ensureTextContent = useCallback(async () => {
     const currentPage = pageNumberRef.current;
+    const currentScale = scaleRef.current;
     if (!pdfDocRef.current) return null;
-    if (textContentCache.current?.page === currentPage)
+    if (
+      textContentCache.current?.page === currentPage &&
+      textContentCache.current?.scale === currentScale
+    )
       return textContentCache.current;
     try {
       const page = await pdfDocRef.current.getPage(currentPage);
       const containerW = containerRef.current?.clientWidth ?? 600;
-      const desiredWidth = Math.min(containerW - 32, 760);
+      const desiredWidth = Math.min(containerW - 32, 760) * currentScale;
       const defaultVp = page.getViewport({ scale: 1 });
-      const scale = desiredWidth / defaultVp.width;
-      const viewport = page.getViewport({ scale });
+      const fitScale = desiredWidth / defaultVp.width;
+      const viewport = page.getViewport({ scale: fitScale });
       const content = await page.getTextContent();
       textContentCache.current = {
         page: currentPage,
+        scale: currentScale,
         items: content.items ?? [],
-        viewport: { scale, width: viewport.width, height: viewport.height },
+        viewport: {
+          scale: fitScale,
+          width: viewport.width,
+          height: viewport.height,
+        },
         rawViewport: viewport,
       };
       return textContentCache.current;
@@ -557,7 +768,7 @@ function PdfViewerInner(
       const tItems = items.filter(
         (it: any) => typeof it.str === "string" && it.str.trim(),
       );
-      const pgEl = containerRef.current?.querySelector(".react-pdf__Page");
+      const pgEl = textLayerEl.closest(".react-pdf__Page");
       const pgTop = pgEl?.getBoundingClientRect().top ?? 0;
       const usedIdx = new Set<number>();
       const stripSym = (s: string) => s.replace(/^[^a-zA-ZÀ-ÖØ-öø-ÿ]+/, "");
@@ -640,605 +851,34 @@ function PdfViewerInner(
     [ensureTextContent],
   );
 
-  // Clear sentence highlight whenever hover popup is dismissed
+  // Reset TTS panel and temp values on popup open/close
   useEffect(() => {
-    if (hoverPopup === null) clearHighlight();
-  }, [hoverPopup, clearHighlight]);
-
-  // Extract sentence using PDF-native textContent items directly.
-  // Bypasses text layer spans entirely for sentence detection — uses them only
-  // for initial hover detection. This ensures stable results regardless of
-  // which span the cursor lands on.
-  const extractSentence = useCallback(
-    async (
-      targetEl: Element,
-      mouseX: number,
-    ): Promise<{
-      text: string;
-      rects: { left: number; top: number; width: number; height: number }[];
-    }> => {
-      const rawText = (targetEl.textContent ?? "").trim();
-      // Korean: Hangul Jamo + Compatibility Jamo + Syllables. CJK + Japanese Kana.
-      // Excludes Enclosed Alphanumerics (Ⓐ U+24B6 etc.) which fell in the old \u1100-\uD7FF range.
-      const KOREAN_RE =
-        /[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF]/;
-      const CJK_RE = /[\u4E00-\u9FFF\u3040-\u30FF]/;
-      const isKoreanOrCJK = (t: string) => KOREAN_RE.test(t) || CJK_RE.test(t);
-      const hasAlpha = (t: string) =>
-        /[a-zA-ZÀ-ÖØ-öø-ÿ]/.test(t) || KOREAN_RE.test(t);
-      const hasLatin = (t: string) => /[a-zA-ZÀ-ÖØ-öø-ÿ]/.test(t);
-
-      if (!hasAlpha(rawText)) return { text: "", rects: [] };
-      if (isKoreanOrCJK(rawText)) {
-        const text = !hasLatin(rawText)
-          ? rawText
-          : rawText
-              .replace(
-                /[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF\u4E00-\u9FFF\u3040-\u30FF]+/g,
-                " ",
-              )
-              .replace(/\s+/g, " ")
-              .trim();
-        return { text, rects: [] };
+    if (popup === null) {
+      setShowTtsPanel(false);
+    } else {
+      // New sentence selected — restore temp values to current persistent settings
+      try {
+        const v = localStorage.getItem("tts_volume");
+        const r = localStorage.getItem("tts_rate");
+        setTempVolume(v ? Number(v) : 0.8);
+        setTempRate(r ? Number(r) : 0.9);
+      } catch {
+        /* ignore */
       }
-
-      // --- Load PDF textContent items (cached) ---
-      const cache = await ensureTextContent();
-      if (!cache) return { text: rawText, rects: [] };
-      const { items, rawViewport } = cache;
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const textItems = items.filter(
-        (it: any) => typeof it.str === "string" && it.str.trim(),
-      );
-      if (textItems.length === 0) return { text: rawText, rects: [] };
-
-      // --- Match hovered span to a textContent item ---
-      const pageEl = containerRef.current?.querySelector(".react-pdf__Page");
-      const pageTop = pageEl?.getBoundingClientRect().top ?? 0;
-      const spanRect = targetEl.getBoundingClientRect();
-      const spanRelY = spanRect.top - pageTop;
-
-      // Match span text to textContent item — try exact match first,
-      // then fallback to stripped match (removes leading symbols like Ⓐ, ●, etc.)
-      const stripLeadingSymbols = (s: string) =>
-        s.replace(/^[^a-zA-ZÀ-ÖØ-öø-ÿ]+/, "");
-      const strippedRaw = stripLeadingSymbols(rawText);
-      let hoveredItemIdx = -1;
-      let bestDist = Infinity;
-      for (let i = 0; i < textItems.length; i++) {
-        const itemStr = textItems[i].str.trim();
-        if (itemStr !== rawText && stripLeadingSymbols(itemStr) !== strippedRaw)
-          continue;
-        const t = textItems[i].transform as number[];
-        const [, py] = rawViewport.convertToViewportPoint(t[4], t[5]);
-        const dist = Math.abs(py - spanRelY);
-        if (dist < bestDist) {
-          bestDist = dist;
-          hoveredItemIdx = i;
-        }
-      }
-      if (hoveredItemIdx === -1) {
-        console.log(
-          "[extract] no matching textContent item for:",
-          JSON.stringify(rawText),
-        );
-        return { text: rawText, rects: [] };
-      }
-
-      // --- Pass 1: Identify right-column items to exclude ---
-      // Group items by line (Y position), then within each line detect horizontal
-      // gaps > 50px. Items after the gap are right-column labels (e.g., "richtig oder falsch").
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const itemPositions = textItems.map((item: any) => {
-        const tr = item.transform as number[];
-        const [x, y] = rawViewport.convertToViewportPoint(tr[4], tr[5]);
-        const [x2] = rawViewport.convertToViewportPoint(
-          tr[4] + (item.width as number),
-          tr[5],
-        );
-        return { x, y, x2 };
-      });
-      const rightColumnItems = new Set<number>();
-      const lineGroups = new Map<number, number[]>();
-      for (let i = 0; i < textItems.length; i++) {
-        if (!textItems[i].str.trim()) continue;
-        const yKey = Math.round(itemPositions[i].y / 4) * 4;
-        if (!lineGroups.has(yKey)) lineGroups.set(yKey, []);
-        lineGroups.get(yKey)!.push(i);
-      }
-      // Step 1: Detect right-column items via same-line horizontal gaps
-      for (const [, indices] of lineGroups) {
-        indices.sort((a, b) => itemPositions[a].x - itemPositions[b].x);
-        for (let j = 1; j < indices.length; j++) {
-          if (
-            itemPositions[indices[j]].x - itemPositions[indices[j - 1]].x2 >
-            50
-          ) {
-            for (let k = j; k < indices.length; k++)
-              rightColumnItems.add(indices[k]);
-            break;
-          }
-        }
-      }
-
-      // Step 2: Detect isolated right-column lines (e.g., "richtig oder falsch" on its own line)
-      // Find the typical left margin from main-column lines
-      const mainLineLefts: number[] = [];
-      for (const [, indices] of lineGroups) {
-        const mainIndices = indices.filter((i) => !rightColumnItems.has(i));
-        if (mainIndices.length > 0) {
-          mainLineLefts.push(
-            Math.min(...mainIndices.map((i) => itemPositions[i].x)),
-          );
-        }
-      }
-      if (mainLineLefts.length >= 3) {
-        mainLineLefts.sort((a, b) => a - b);
-        const refLeftMargin =
-          mainLineLefts[Math.floor(mainLineLefts.length / 4)]; // 25th percentile
-        for (const [, indices] of lineGroups) {
-          // If ALL items on this line start far right of the main left margin → right column
-          if (indices.every((i) => itemPositions[i].x > refLeftMargin + 150)) {
-            for (const i of indices) rightColumnItems.add(i);
-          }
-        }
-      }
-
-      // DEBUG: log column detection results
-      const skippedTexts = [...rightColumnItems].map((i) =>
-        textItems[i].str.trim(),
-      );
-      console.log("[columns]", {
-        totalItems: textItems.length,
-        rightColumnCount: rightColumnItems.size,
-        skippedTexts,
-        lineGroupCount: lineGroups.size,
-        mainLineLefts: mainLineLefts.slice(0, 5),
-      });
-
-      // --- Pass 2: Build concat from the column the hovered item belongs to ---
-      // If hovered item is in right column, build concat from right-column items;
-      // otherwise build from main-column items. This allows hovering on both columns.
-      const hoveredInRightCol = rightColumnItems.has(hoveredItemIdx);
-      const itemMap: { itemIdx: number; charStart: number; charEnd: number }[] =
-        [];
-      let concat = "";
-      for (let i = 0; i < textItems.length; i++) {
-        const inRightCol = rightColumnItems.has(i);
-        if (hoveredInRightCol ? !inRightCol : inRightCol) continue;
-        const str = textItems[i].str.trim();
-        if (!str) continue;
-        // Skip Korean-dominant items to prevent them from contaminating
-        // German sentence boundary detection. An item is Korean-dominant
-        // if it contains Korean/CJK and Korean chars outnumber Latin chars.
-        if (isKoreanOrCJK(str)) {
-          const korCount = (
-            str.match(
-              /[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF\u4E00-\u9FFF\u3040-\u30FF]/g,
-            ) || []
-          ).length;
-          const latCount = (str.match(/[a-zA-ZÀ-ÖØ-öø-ÿ]/g) || []).length;
-          if (korCount > latCount) continue;
-        }
-        if (concat.length > 0) concat += " ";
-        const charStart = concat.length;
-        concat += str;
-        itemMap.push({ itemIdx: i, charStart, charEnd: concat.length });
-      }
-
-      // --- Find hovered position in concatenated text using mouse X ---
-      const hoveredEntry = itemMap.find((e) => e.itemIdx === hoveredItemIdx);
-      if (!hoveredEntry) return { text: rawText, rects: [] };
-      // Use mouse X position relative to the span to pinpoint character position
-      const elRect = targetEl.getBoundingClientRect();
-      const xFrac =
-        elRect.width > 0
-          ? Math.max(0, Math.min(1, (mouseX - elRect.left) / elRect.width))
-          : 0.5;
-      const itemLen = hoveredEntry.charEnd - hoveredEntry.charStart;
-      const hoveredCharPos =
-        hoveredEntry.charStart + Math.floor(xFrac * itemLen);
-
-      // --- German-aware sentence boundary detection ---
-      // Rule: "." + space (or end) = sentence end, UNLESS word before "." is a known abbreviation.
-      // This correctly handles "beliebt. richtig" (sentence end) vs "z.B. und" (abbreviation).
-      const isSentenceEnd = (pos: number): boolean => {
-        const ch = concat[pos];
-        if (ch === "!" || ch === "?") return true;
-        if (ch !== ".") return false;
-        // Ellipsis "..." — not a sentence end
-        if (concat[pos + 1] === ".") return false;
-        // Must be followed by space or end of text
-        if (pos + 1 < concat.length && concat[pos + 1] !== " ") return false;
-        // Check word before dot against abbreviation list
-        let ws = pos - 1;
-        while (ws >= 0 && /[a-zA-ZÀ-ÖØ-öø-ÿ.]/.test(concat[ws])) ws--;
-        ws++;
-        const word = concat.slice(ws, pos);
-        if (GERMAN_ABBREVS.some((a) => a.toLowerCase() === word.toLowerCase()))
-          return false;
-        // Single uppercase letter + dot = initial (e.g., "A." "B.") — not sentence end
-        if (pos - ws === 1 && /[A-ZÀ-ÖØ-Ý]/.test(word)) return false;
-        // Number + dot = list item (e.g., "1." "2.") — treat as sentence boundary
-        return true;
-      };
-
-      // Enclosed alphanumerics (Ⓐ Ⓑ ① ② etc.) act as section/option boundaries
-      const isEnclosedAlphanumeric = (ch: string) =>
-        ch.charCodeAt(0) >= 0x2460 && ch.charCodeAt(0) <= 0x24ff;
-
-      let sentCharStart = 0;
-      for (let i = hoveredCharPos - 1; i >= 0; i--) {
-        if (".!?".includes(concat[i]) && isSentenceEnd(i)) {
-          sentCharStart = i + 1;
-          break;
-        }
-        if (isEnclosedAlphanumeric(concat[i])) {
-          sentCharStart = i;
-          break;
-        }
-      }
-      // Skip whitespace and decorative symbols at sentence start
-      while (
-        sentCharStart < concat.length &&
-        /[\s\u2460-\u24FF\u2700-\u27BF●■□▪▫◆◇★☆►▶‣⁃※†‡§¶]/.test(
-          concat[sentCharStart],
-        )
-      )
-        sentCharStart++;
-
-      let sentCharEnd = concat.length;
-      for (let i = hoveredCharPos; i < concat.length; i++) {
-        if (".!?".includes(concat[i]) && isSentenceEnd(i)) {
-          sentCharEnd = i + 1;
-          break;
-        }
-        // Stop before the next enclosed alphanumeric (next option/section)
-        if (isEnclosedAlphanumeric(concat[i]) && i > hoveredCharPos) {
-          sentCharEnd = i;
-          break;
-        }
-      }
-
-      // German sentences always start with an uppercase letter.
-      // Skip non-sentence tokens at the start: numbers ("65"), control chars,
-      // enclosed alphanumerics, lowercase words ("einsteigen"), heading annotations
-      // ("Können(Modalverben)"), and standalone single words ("können").
-      while (sentCharStart < sentCharEnd) {
-        const ch = concat[sentCharStart];
-        if (!ch) break;
-        // Skip: non-uppercase chars (digits, lowercase, symbols, control chars)
-        if (!/[A-ZÀ-ÖØ-Ý]/.test(ch)) {
-          const nextSpace = concat.indexOf(" ", sentCharStart);
-          if (nextSpace === -1 || nextSpace >= sentCharEnd) break;
-          sentCharStart = nextSpace + 1;
-          continue;
-        }
-        // Check the current token (up to next space)
-        const tokenEnd = concat.indexOf(" ", sentCharStart);
-        const token =
-          tokenEnd === -1 || tokenEnd >= sentCharEnd
-            ? concat.slice(sentCharStart, sentCharEnd)
-            : concat.slice(sentCharStart, tokenEnd);
-        // Skip tokens with parenthetical annotations: "Können(Modalverben)", "Präfix(접두사)"
-        if (/\(/.test(token)) {
-          if (tokenEnd === -1 || tokenEnd >= sentCharEnd) break;
-          sentCharStart = tokenEnd + 1;
-          continue;
-        }
-        // Skip single capitalized words followed by a lowercase word — these are
-        // vocabulary labels like "können" preceded by heading "Können"
-        // Real sentences have at least 2 words starting from the uppercase token.
-        if (tokenEnd !== -1 && tokenEnd < sentCharEnd) {
-          const nextCh = concat[tokenEnd + 1];
-          if (nextCh && /[a-zà-öø-ÿ]/.test(nextCh)) {
-            // The next word is lowercase — this uppercase token + lowercase word
-            // might still be a real sentence ("Das ist..."). Only skip if the
-            // uppercase token is a single word with no following sentence structure.
-            // Heuristic: if the token after this lowercase word starts uppercase,
-            // skip both (heading + vocab label pattern).
-            const nextTokenEnd = concat.indexOf(" ", tokenEnd + 1);
-            if (nextTokenEnd !== -1 && nextTokenEnd < sentCharEnd) {
-              const afterNext = concat[nextTokenEnd + 1];
-              if (afterNext && /[A-ZÀ-ÖØ-Ý]/.test(afterNext)) {
-                // Pattern: "Können können Ihr..." → skip "Können können", keep "Ihr..."
-                sentCharStart = nextTokenEnd + 1;
-                continue;
-              }
-            }
-          }
-        }
-        // Uppercase letter, not a heading/label pattern — valid sentence start
-        break;
-      }
-
-      // Skip heading annotations with parentheses: "Trennbare Verben Präfix(접두사)* + Verb(동사)"
-      // Find the last ")" before the hovered position and advance past it if the next
-      // substantive token starts with an uppercase letter (= real sentence start).
-      {
-        let lastParenEnd = -1;
-        for (let p = sentCharStart; p < hoveredCharPos; p++) {
-          if (concat[p] === ")") lastParenEnd = p;
-        }
-        if (lastParenEnd > sentCharStart) {
-          // Advance past ")" and any trailing non-alpha chars (*, +, spaces)
-          let candidate = lastParenEnd + 1;
-          while (
-            candidate < sentCharEnd &&
-            /[\s*+\-□\u001a]/.test(concat[candidate])
-          )
-            candidate++;
-          // Only advance if we land on an uppercase letter (real sentence start)
-          if (
-            candidate < hoveredCharPos &&
-            /[A-ZÀ-ÖØ-Ý]/.test(concat[candidate])
-          ) {
-            sentCharStart = candidate;
-          }
-        }
-      }
-
-      // Skip dialogue speaker labels (e.g., "Jana :", "Peter:", "Leo :")
-      // Search for the LAST "Name :" pattern before the hovered position,
-      // so labels preceded by exercise numbering/vocab lists are still caught.
-      {
-        const NAME_COLON_RE = /\b([A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ]*)\s*:/g;
-        let lastColonEnd = -1;
-        let m: RegExpExecArray | null;
-        while ((m = NAME_COLON_RE.exec(concat)) !== null) {
-          const colonPos = m.index + m[0].length - 1; // position of ":"
-          if (colonPos >= sentCharStart && colonPos < hoveredCharPos) {
-            lastColonEnd = colonPos + 1;
-          }
-        }
-        if (lastColonEnd > sentCharStart) {
-          sentCharStart = lastColonEnd;
-          while (sentCharStart < sentCharEnd && concat[sentCharStart] === " ")
-            sentCharStart++;
-        }
-      }
-
-      // If the hovered position fell in a skipped label region (before the real sentence),
-      // return empty — the user is hovering on a label, not a sentence.
-      if (hoveredCharPos < sentCharStart) return { text: "", rects: [] };
-
-      // Validate that the extracted sentence is a real German sentence, not
-      // exercise labels, repeated fragments, or book metadata.
-      {
-        const sentText = concat.slice(sentCharStart, sentCharEnd).trim();
-        const words = sentText.split(/\s+/).filter(Boolean);
-
-        // Too short to be a sentence
-        if (words.length < 3) return { text: "", rects: [] };
-
-        // Exercise labels: "b)", "c)", "1)", "2)" etc.
-        if (/\b[a-z0-9]\)\s/.test(sentText)) return { text: "", rects: [] };
-
-        // Audio/media markers
-        if (/\bMP3\b|\bCD\b|\bTrack\b/i.test(sentText))
-          return { text: "", rects: [] };
-
-        // Book title metadata
-        if (/Zusammen\s+[A-C][0-9]/i.test(sentText))
-          return { text: "", rects: [] };
-
-        // Repetition check: any 2-word sequence appearing 2+ times = fragment list
-        const seq2: Record<string, number> = {};
-        for (let i = 0; i < words.length - 1; i++) {
-          const key = `${words[i].toLowerCase()} ${words[i + 1].toLowerCase()}`;
-          seq2[key] = (seq2[key] ?? 0) + 1;
-          if (seq2[key] >= 2) return { text: "", rects: [] };
-        }
-      }
-
-      // DEBUG: log sentence detection
-      const contextStart = Math.max(0, sentCharStart - 30);
-      const contextEnd = Math.min(concat.length, sentCharEnd + 30);
-      console.log("[sentence]", {
-        hoveredSpan: rawText,
-        hoveredCharPos,
-        sentRange: `${sentCharStart}-${sentCharEnd}`,
-        sentence: concat.slice(sentCharStart, sentCharEnd),
-        contextBefore: concat.slice(contextStart, sentCharStart),
-        contextAfter: concat.slice(sentCharEnd, contextEnd),
-      });
-
-      // --- Map sentence back to textContent items + compute rects from PDF coords ---
-      const overlapping = itemMap.filter(
-        (e) => e.charEnd > sentCharStart && e.charStart < sentCharEnd,
-      );
-      const rects: {
-        left: number;
-        top: number;
-        width: number;
-        height: number;
-      }[] = [];
-
-      // Find matching text layer spans for measureText font matching
-      const textLayerEl = containerRef.current?.querySelector(
-        ".react-pdf__Page__textContent",
-      );
-      const textLayerSpans = textLayerEl
-        ? Array.from(textLayerEl.querySelectorAll("span"))
-        : [];
-
-      for (let i = 0; i < overlapping.length; i++) {
-        const entry = overlapping[i];
-        const item = textItems[entry.itemIdx];
-        const t = item.transform as number[];
-        const fontSize = Math.abs(t[3]);
-        const pdfX = t[4];
-        const pdfY = t[5];
-        const pdfW = item.width as number;
-        const itemStr = item.str as string;
-
-        const [x1, y1] = rawViewport.convertToViewportPoint(pdfX, pdfY);
-        const [x2, y2] = rawViewport.convertToViewportPoint(
-          pdfX + pdfW,
-          pdfY + fontSize,
-        );
-        const fullWidth = Math.abs(x2 - x1);
-
-        // Clip first/last items if sentence boundary is mid-item
-        // Use measureText() for accurate sub-string width calculation
-        let fracLeft = 0;
-        let fracRight = 1;
-        const needsClip =
-          (i === 0 && sentCharStart > entry.charStart) ||
-          (i === overlapping.length - 1 && sentCharEnd < entry.charEnd);
-
-        if (needsClip) {
-          // Find matching span for font info
-          const itemText = itemStr.trim();
-          const stripSym = (s: string) => s.replace(/^[^a-zA-ZÀ-ÖØ-öø-ÿ]+/, "");
-          const matchSpan = textLayerSpans.find((sp) => {
-            const spText = (sp.textContent ?? "").trim();
-            return (
-              spText === itemText || stripSym(spText) === stripSym(itemText)
-            );
-          });
-
-          const ctx = document.createElement("canvas").getContext("2d");
-          if (ctx && matchSpan) {
-            ctx.font = window.getComputedStyle(matchSpan).font;
-            const fullW = ctx.measureText(itemStr).width;
-            if (fullW > 0) {
-              if (i === 0 && sentCharStart > entry.charStart) {
-                const clipChars = sentCharStart - entry.charStart;
-                fracLeft =
-                  ctx.measureText(itemStr.slice(0, clipChars)).width / fullW;
-              }
-              if (i === overlapping.length - 1 && sentCharEnd < entry.charEnd) {
-                const keepChars = sentCharEnd - entry.charStart;
-                fracRight =
-                  ctx.measureText(itemStr.slice(0, keepChars)).width / fullW;
-              }
-            }
-          } else {
-            // Fallback to character-count ratio
-            const itemLen = entry.charEnd - entry.charStart;
-            if (itemLen > 0) {
-              if (i === 0 && sentCharStart > entry.charStart) {
-                fracLeft = (sentCharStart - entry.charStart) / itemLen;
-              }
-              if (i === overlapping.length - 1 && sentCharEnd < entry.charEnd) {
-                fracRight = (sentCharEnd - entry.charStart) / itemLen;
-              }
-            }
-          }
-        }
-
-        rects.push({
-          left: Math.min(x1, x2) + fullWidth * fracLeft,
-          top: Math.min(y1, y2),
-          width: fullWidth * (fracRight - fracLeft),
-          height: Math.abs(y2 - y1),
-        });
-      }
-
-      // Strip decorative symbols (Ⓐ Ⓑ ● ■ etc.) from the final text
-      const sentenceText = concat
-        .slice(sentCharStart, sentCharEnd)
-        .replace(/[\u2460-\u24FF\u2700-\u27BF●■□▪▫◆◇★☆►▶‣⁃※†‡§¶]/g, "")
-        .replace(/\s+/g, " ")
-        .trim();
-      return { text: sentenceText, rects };
-    },
-    [ensureTextContent],
-  );
-
-  // Hover detection on the PDF container
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-
-    const clearShow = () => {
-      if (hoverShowTimer.current) clearTimeout(hoverShowTimer.current);
-    };
-    const clearHide = () => {
-      if (hoverHideTimer.current) clearTimeout(hoverHideTimer.current);
-    };
-
-    const handleMouseMove = (e: MouseEvent) => {
-      // Hover blocked after selection popup dismisses — wait until mouse moves far enough
-      if (hoverBlockOriginRef.current) {
-        const dx = e.clientX - hoverBlockOriginRef.current.x;
-        const dy = e.clientY - hoverBlockOriginRef.current.y;
-        if (dx * dx + dy * dy < HOVER_BLOCK_DIST * HOVER_BLOCK_DIST) {
-          clearShow();
-          return;
-        }
-        hoverBlockOriginRef.current = null;
-      }
-      if (popupActiveRef.current) return;
-      const el = document.elementFromPoint(e.clientX, e.clientY);
-      // If cursor is over the hover popup itself, cancel show timer only.
-      // Do NOT cancel the hide timer — mouseleave-triggered hides must still fire.
-      // onMouseEnter on the popup itself handles cancelling hide when cursor is there.
-      const hoverPopupEl = document.getElementById("pdf-hover-popup");
-      if (hoverPopupEl && el && hoverPopupEl.contains(el)) {
-        clearShow();
-        return;
-      }
-      const textLayer = container.querySelector(
-        ".react-pdf__Page__textContent",
-      );
-      if (!textLayer) return;
-      if (!el || !textLayer.contains(el)) {
-        clearShow();
-        clearHide();
-        hoverHideTimer.current = setTimeout(() => setHoverPopup(null), 100);
-        return;
-      }
-      // Only trigger on leaf text elements (no child elements, has text content)
-      if (el.childElementCount > 0 || !(el.textContent ?? "").trim()) {
-        clearShow();
-        clearHide();
-        hoverHideTimer.current = setTimeout(() => setHoverPopup(null), 100);
-        return;
-      }
-      // Only trigger if span contains a Latin letter.
-      // Previously required starting with a letter, which blocked spans like
-      // "Ⓐ Aus welchem Land kommst du?" where Ⓐ (U+24B6) is not in the ASCII range.
-      const spanText = (el.textContent ?? "").trim();
-      const hasLatinLetter = /[a-zA-ZÀ-ÖØ-öø-ÿ]/.test(spanText);
-      if (!hasLatinLetter) {
-        clearShow();
-        clearHide();
-        hoverHideTimer.current = setTimeout(() => setHoverPopup(null), 100);
-        return;
-      }
-      clearHide();
-      clearShow();
-      hoverShowTimer.current = setTimeout(async () => {
-        if (popupActiveRef.current) return;
-        const { text, rects } = await extractSentence(el, e.clientX);
-        if (text && /[a-zA-ZÀ-ÖØ-öø-ÿ]/.test(text)) {
-          clearHighlight();
-          setHighlightRects(rects);
-          setHoverPopup({ x: e.clientX, y: e.clientY, text });
-        }
-      }, 400);
-    };
-
-    const handleMouseLeave = () => {
-      clearShow();
-      clearHide();
-      clearHighlight();
-      hoverHideTimer.current = setTimeout(() => setHoverPopup(null), 300);
-    };
-
-    container.addEventListener("mousemove", handleMouseMove);
-    container.addEventListener("mouseleave", handleMouseLeave);
-    return () => {
-      container.removeEventListener("mousemove", handleMouseMove);
-      container.removeEventListener("mouseleave", handleMouseLeave);
-      clearShow();
-      clearHide();
-      clearHighlight();
-    };
-  }, [extractSentence, file, clearHighlight]);
+    }
+  }, [popup]);
+  // Find the text layer (react-pdf__Page__textContent) that contains a given node.
+  // Needed because multi-page rendering creates one text layer per page.
+  function findTextLayer(node: Node): Element | null {
+    const layers = containerRef.current?.querySelectorAll(
+      ".react-pdf__Page__textContent",
+    );
+    if (!layers) return null;
+    for (const layer of Array.from(layers)) {
+      if (layer.contains(node)) return layer;
+    }
+    return null;
+  }
 
   // caretRangeFromPoint with Firefox fallback
   function getCaretRange(x: number, y: number): Range | null {
@@ -1259,33 +899,18 @@ function PdfViewerInner(
     const handleMouseDown = (e: MouseEvent) => {
       const popupEl = document.getElementById("pdf-selection-popup");
       if (popupEl && !popupEl.contains(e.target as Node)) {
-        hoverBlockOriginRef.current = { x: e.clientX, y: e.clientY };
         setPopup(null);
       }
 
-      const hoverPopupEl = document.getElementById("pdf-hover-popup");
-      if (hoverPopupEl && !hoverPopupEl.contains(e.target as Node))
-        setHoverPopup(null);
-
-      const textLayer = containerRef.current?.querySelector(
-        ".react-pdf__Page__textContent",
-      );
-      // Check if click is on a popup (selection or hover) — don't clear in that case
-      const selPopupEl = document.getElementById("pdf-selection-popup");
-      const hvrPopupEl = document.getElementById("pdf-hover-popup");
-      const isOnPopup =
-        selPopupEl?.contains(e.target as Node) ||
-        hvrPopupEl?.contains(e.target as Node);
+      const textLayer = findTextLayer(e.target as Node);
+      const isOnPopup = popupEl?.contains(e.target as Node);
 
       if (textLayer?.contains(e.target as Node)) {
         dragStartPoint.current = { x: e.clientX, y: e.clientY };
         isDragging.current = true;
-        // Clear previous selection and hover highlight when starting new drag
         setSelectionRects([]);
-        setHighlightRects([]);
       } else if (!isOnPopup) {
         dragStartPoint.current = null;
-        // Focus-out: clicking outside text layer and popups clears selection
         setSelectionRects([]);
         setPopup(null);
       }
@@ -1298,14 +923,11 @@ function PdfViewerInner(
         dy = e.clientY - start.y;
       if (dx * dx + dy * dy < 25) return; // minimum drag distance
 
-      const textLayer = containerRef.current?.querySelector(
-        ".react-pdf__Page__textContent",
-      );
-      if (!textLayer) return;
-
       const startCaret = getCaretRange(start.x, start.y);
       const endCaret = getCaretRange(e.clientX, e.clientY);
       if (!startCaret || !endCaret) return;
+      const textLayer = findTextLayer(startCaret.startContainer);
+      if (!textLayer) return;
       if (
         !textLayer.contains(startCaret.startContainer) ||
         !textLayer.contains(endCaret.startContainer)
@@ -1340,16 +962,19 @@ function PdfViewerInner(
     const handleMouseUp = (e: MouseEvent) => {
       isDragging.current = false;
       setTimeout(async () => {
-        const textLayer = containerRef.current?.querySelector(
-          ".react-pdf__Page__textContent",
-        );
         const start = dragStartPoint.current;
         dragStartPoint.current = null;
-        if (!textLayer || !start) return;
+        if (!start) return;
 
         const startCaret = getCaretRange(start.x, start.y);
         const endCaret = getCaretRange(e.clientX, e.clientY);
         if (!startCaret || !endCaret) {
+          setPopup(null);
+          return;
+        }
+
+        const textLayer = findTextLayer(startCaret.startContainer);
+        if (!textLayer) {
           setPopup(null);
           return;
         }
@@ -1396,9 +1021,7 @@ function PdfViewerInner(
     };
 
     const handleDblClick = (e: MouseEvent) => {
-      const textLayer = containerRef.current?.querySelector(
-        ".react-pdf__Page__textContent",
-      );
+      const textLayer = findTextLayer(e.target as Node);
       if (!textLayer?.contains(e.target as Node)) return;
       // Browser word-selects on dblclick; read that selection after
       // handleMouseUp's timeout (10ms) has already run and skipped.
@@ -1421,6 +1044,7 @@ function PdfViewerInner(
       }, 50);
     };
 
+    // Re-open popup when hovering back over still-active selection highlight
     document.addEventListener("mousedown", handleMouseDown);
     document.addEventListener("mousemove", handleMouseMoveDrag);
     document.addEventListener("mouseup", handleMouseUp);
@@ -1433,10 +1057,15 @@ function PdfViewerInner(
     };
   }, [computeRangeRects]);
 
-  const handleFileChange = useCallback((f: File) => {
+  const handleFileChange = useCallback((f: File, skipUpload = false) => {
     if (f.type !== "application/pdf") return;
     setFile(f);
     setNumPages(0);
+    setPageNumber(1);
+    setPageHeight(0);
+    setPdfReady(false);
+    lastSavedPageRef.current = 1;
+    pageContainerRefs.current = [];
     setPopup(null);
     setShowSearch(false);
     setSearchQuery("");
@@ -1445,9 +1074,9 @@ function PdfViewerInner(
     setTocIsGenerated(false);
     setShowToc(false);
     setAnnotations([]);
-    setIsNoteMode(false);
-    setPendingNote(null);
-    setEditingAnnot(null);
+    setIsStickyMode(false);
+    setPendingSticky(null);
+    setEditingSticky(null);
     pdfDocRef.current = null;
 
     const meta = upsertLibraryMeta(f);
@@ -1455,10 +1084,12 @@ function PdfViewerInner(
     const existingServerId = existing?.serverId ?? null;
     setServerId(existingServerId);
     localStorage.setItem(LIBRARY_CURRENT_KEY, f.name);
-    savePdfToLibrary(f).catch(() => { /* ignore IDB errors */ });
+    savePdfToLibrary(f).catch(() => {
+      /* ignore IDB errors */
+    });
 
-    // Upload to server in background if not already done
-    if (!existingServerId) {
+    // Upload to server in background if not already done (skip when parent handles it)
+    if (!existingServerId && !skipUpload) {
       const formData = new FormData();
       formData.append("file", f);
       fetch("/api/pdfs", { method: "POST", body: formData })
@@ -1469,7 +1100,9 @@ function PdfViewerInner(
             setLibraryMetaServerId(f.name, data.id);
           }
         })
-        .catch(() => { /* ignore upload errors */ });
+        .catch(() => {
+          /* ignore upload errors */
+        });
     }
   }, []);
 
@@ -1603,7 +1236,10 @@ function PdfViewerInner(
           <div className="flex items-center gap-1 shrink-0">
             {/* Language selector button */}
             <button
-              onClick={() => setShowLangModal(true)}
+              onClick={() => {
+                setPendingLang(null);
+                setShowLangModal(true);
+              }}
               title="학습 언어 선택"
               className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium transition-colors ${
                 language
@@ -1616,13 +1252,25 @@ function PdfViewerInner(
                   <span className="text-sm leading-none">
                     {TTS_LANGUAGES.find((l) => l.code === language)?.flag}
                   </span>
-                  <span>{TTS_LANGUAGES.find((l) => l.code === language)?.label}</span>
+                  <span>
+                    {TTS_LANGUAGES.find((l) => l.code === language)?.label}
+                  </span>
                 </>
               ) : (
                 <>
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                  <svg
+                    className="w-3.5 h-3.5"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                  >
                     <circle cx="12" cy="12" r="10" />
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M2 12h20M12 2a15.3 15.3 0 010 20M12 2a15.3 15.3 0 000 20" />
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M2 12h20M12 2a15.3 15.3 0 010 20M12 2a15.3 15.3 0 000 20"
+                    />
                   </svg>
                   <span>언어 선택</span>
                 </>
@@ -1684,7 +1332,7 @@ function PdfViewerInner(
                         <button
                           key={i}
                           onClick={() => {
-                            setPageNumber(item.page);
+                            scrollToPage(item.page);
                             setShowToc(false);
                           }}
                           style={{ paddingLeft: `${8 + item.level * 12}px` }}
@@ -1824,7 +1472,7 @@ function PdfViewerInner(
                               <button
                                 key={r.page}
                                 onClick={() => {
-                                  setPageNumber(r.page);
+                                  scrollToPage(r.page);
                                   setShowSearch(false);
                                   setSearchQuery("");
                                   setSearchResults([]);
@@ -1873,14 +1521,24 @@ function PdfViewerInner(
           </div>
         </div>
 
+        {/* Loading overlay — shown until page restore is complete */}
+        {!pdfReady && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-gray-50">
+            <span className="w-5 h-5 border-2 border-gray-300 border-t-blue-500 rounded-full animate-spin" />
+          </div>
+        )}
+
         {/* Page area */}
-        <div className="flex-1 overflow-y-auto flex justify-center items-start px-4 py-4 pb-16">
+        <div className="pdf-scroll-area flex-1 overflow-y-auto flex flex-col items-center px-4 py-4 pb-16">
           <Document
+            key={file.name}
             file={file}
             options={DOCUMENT_OPTIONS}
             onLoadSuccess={async (pdf) => {
               setNumPages(pdf.numPages);
               pdfDocRef.current = pdf;
+              // No serverId → no page restore needed, show immediately
+              if (!serverId) setPdfReady(true);
               setToc([]);
               setTocIsGenerated(false);
               try {
@@ -1914,215 +1572,312 @@ function PdfViewerInner(
               </div>
             }
           >
-            <div
-              className="relative"
-              onClick={(e) => {
-                if (!isNoteMode) return;
-                const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
-                const xPct = ((e.clientX - rect.left) / rect.width) * 100;
-                const yPct = ((e.clientY - rect.top) / rect.height) * 100;
-                setPendingNote({ xPct, yPct });
-                setNoteText("");
-                setEditingAnnot(null);
-              }}
-              style={isNoteMode ? { cursor: "crosshair" } : undefined}
-            >
-              <Page
-                pageNumber={pageNumber}
-                renderTextLayer={true}
-                renderAnnotationLayer={false}
-                className="shadow-md"
-                width={
-                  Math.min(
-                    (containerRef.current?.clientWidth ?? 600) - 32,
-                    760,
-                  ) * scale
-                }
-                onRenderSuccess={() => {
-                  onPageChange?.(pageNumber);
-                }}
-              />
-              {/* Canvas-accurate hover highlight overlay (light blue) */}
-              {highlightRects.map((rect, i) => (
+            {Array.from({ length: numPages }, (_, i) => i + 1).map((n) => {
+              const pageWidth =
+                Math.min((containerRef.current?.clientWidth ?? 600) - 32, 760) *
+                scale;
+              // Only render pages within ±3 of current page; show placeholder for others
+              const inWindow = Math.abs(n - pageNumber) <= 3;
+              const placeholderHeight =
+                pageHeight > 0 ? pageHeight : pageWidth * 1.414;
+              return (
                 <div
-                  key={`h-${i}`}
-                  className="absolute pointer-events-none"
-                  style={{
-                    left: rect.left,
-                    top: rect.top,
-                    width: rect.width,
-                    height: rect.height,
-                    backgroundColor: "rgba(250, 204, 21, 0.35)",
-                    borderRadius: 2,
-                    zIndex: 3,
+                  key={n}
+                  data-page={n}
+                  ref={(el) => {
+                    pageContainerRefs.current[n - 1] = el;
                   }}
-                />
-              ))}
-              {/* Canvas-accurate selection highlight overlay (darker blue) */}
-              {selectionRects.map((rect, i) => (
-                <div
-                  key={`s-${i}`}
-                  className="absolute pointer-events-none"
-                  style={{
-                    left: rect.left,
-                    top: rect.top,
-                    width: rect.width,
-                    height: rect.height,
-                    backgroundColor: "rgba(250, 204, 21, 0.45)",
-                    borderRadius: 2,
-                    zIndex: 4,
+                  className="relative mb-4"
+                  onClick={(e) => {
+                    if (!isStickyMode || n !== pageNumber) return;
+                    const rect = (
+                      e.currentTarget as HTMLDivElement
+                    ).getBoundingClientRect();
+                    const xPct = ((e.clientX - rect.left) / rect.width) * 100;
+                    const yPct = ((e.clientY - rect.top) / rect.height) * 100;
+                    setPendingSticky({ xPct, yPct });
+                    setStickyText("");
+                    setEditingSticky(null);
                   }}
-                />
-              ))}
-              {/* Annotation pins */}
-              {annotations.map((ann) => (
-                <div
-                  key={ann.id}
-                  className="absolute"
-                  style={{
-                    left: `${ann.x_pct}%`,
-                    top: `${ann.y_pct}%`,
-                    transform: "translate(-50%, -100%)",
-                    zIndex: 10,
-                  }}
+                  style={
+                    isStickyMode && n === pageNumber
+                      ? { cursor: "crosshair" }
+                      : undefined
+                  }
                 >
-                  <button
-                    onMouseDown={(e) => e.stopPropagation()}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setEditingAnnot(ann);
-                      setNoteText(ann.text);
-                      setNoteColor(ann.color);
-                      setPendingNote(null);
-                    }}
-                    title={ann.text}
-                    className="text-lg leading-none hover:scale-125 transition-transform"
-                  >
-                    📌
-                  </button>
-                  {/* Edit popover */}
-                  {editingAnnot?.id === ann.id && (
+                  {inWindow ? (
+                    <Page
+                      pageNumber={n}
+                      renderTextLayer={true}
+                      renderAnnotationLayer={false}
+                      className="shadow-md"
+                      width={pageWidth}
+                      onRenderSuccess={(page) => {
+                        if (n === 1) setPageHeight(page.height);
+                        if (n === pageNumber) onPageChange?.(pageNumber);
+                      }}
+                    />
+                  ) : (
                     <div
-                      className="absolute left-1/2 -translate-x-1/2 mt-1 w-56 bg-white border border-gray-200 rounded-lg shadow-xl p-2 z-20 flex flex-col gap-2"
-                      style={{ top: "100%" }}
+                      className="shadow-md bg-white"
+                      style={{ width: pageWidth, height: placeholderHeight }}
+                    />
+                  )}
+                  {/* Canvas-accurate selection highlight overlay */}
+                  {n === pageNumber &&
+                    selectionRects.map((rect, i) => (
+                      <div
+                        key={`s-${i}`}
+                        className="absolute pointer-events-none"
+                        style={{
+                          left: rect.left,
+                          top: rect.top,
+                          width: rect.width,
+                          height: rect.height,
+                          backgroundColor: "rgba(250, 204, 21, 0.45)",
+                          borderRadius: 2,
+                          zIndex: 4,
+                        }}
+                      />
+                    ))}
+                  {/* Annotation pins for this page */}
+                  {annotations
+                    .filter((ann) => ann.page_num === n)
+                    .map((ann) => (
+                      <div
+                        key={ann.id}
+                        className="absolute"
+                        style={{
+                          left: `${draggingPin?.annId === ann.id ? draggingPin.xPct : ann.x_pct}%`,
+                          top: `${draggingPin?.annId === ann.id ? draggingPin.yPct : ann.y_pct}%`,
+                          transform: "translate(-50%, -100%)",
+                          zIndex: 10,
+                          cursor:
+                            draggingPin?.annId === ann.id ? "grabbing" : "grab",
+                        }}
+                      >
+                        <button
+                          onMouseDown={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            const pageEl = (e.currentTarget as Element).closest(
+                              "[data-page]",
+                            );
+                            if (!pageEl) return;
+                            pinDragRef.current = {
+                              ann,
+                              pageEl,
+                              startX: e.clientX,
+                              startY: e.clientY,
+                              hasMoved: false,
+                            };
+                          }}
+                          onClick={(e) => {
+                            if (pinWasDraggedRef.current) {
+                              pinWasDraggedRef.current = false;
+                              return;
+                            }
+                            e.stopPropagation();
+                            setEditingSticky(ann);
+                            setStickyText(ann.text);
+                            setStickyColor(ann.color);
+                            setPendingSticky(null);
+                          }}
+                          title={ann.text}
+                          className="text-lg leading-none hover:scale-125 transition-transform"
+                          style={{ cursor: "inherit" }}
+                        >
+                          📌
+                        </button>
+                        {/* Edit popover — Windows Sticky Note style */}
+                        {editingSticky?.id === ann.id && (
+                          <div
+                            className="absolute left-1/2 -translate-x-1/2 mt-1 z-20 rounded-lg shadow-2xl overflow-hidden flex flex-col"
+                            style={{
+                              top: "100%",
+                              width: "220px",
+                              backgroundColor: STICKY_COLORS[stickyColor]?.body ?? "#fef9c3",
+                            }}
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            {/* Header bar */}
+                            <div
+                              className="flex items-center px-2 py-1.5 gap-1.5"
+                              style={{ backgroundColor: STICKY_COLORS[stickyColor]?.header ?? "#f59e0b" }}
+                            >
+                              {["yellow", "pink", "green", "blue"].map((c) => (
+                                <button
+                                  key={c}
+                                  onClick={() => setStickyColor(c)}
+                                  className="w-3.5 h-3.5 rounded-full transition-transform hover:scale-110"
+                                  style={{
+                                    backgroundColor: STICKY_COLORS[c]?.body ?? "#fef9c3",
+                                    outline: stickyColor === c ? "2px solid white" : "none",
+                                    outlineOffset: "1px",
+                                  }}
+                                />
+                              ))}
+                              <div className="flex-1" />
+                              <button
+                                className="text-white/80 hover:text-white transition-colors"
+                                title="삭제"
+                                onClick={async () => {
+                                  if (!serverId) return;
+                                  await deleteAnnotation(serverId, ann.id);
+                                  setAnnotations((prev) =>
+                                    prev.filter((a) => a.id !== ann.id),
+                                  );
+                                  setEditingSticky(null);
+                                }}
+                              >
+                                <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
+                                  <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
+                                </svg>
+                              </button>
+                            </div>
+                            {/* Body */}
+                            <textarea
+                              className="w-full text-sm p-2.5 resize-none focus:outline-none bg-transparent leading-relaxed"
+                              rows={4}
+                              value={stickyText}
+                              onChange={(e) => setStickyText(e.target.value)}
+                              autoFocus
+                              onKeyDown={(e) => {
+                                if (e.key === "Escape") setEditingSticky(null);
+                              }}
+                            />
+                            {/* Footer */}
+                            <div className="flex justify-end px-2 pb-2 gap-2">
+                              <button
+                                className="text-xs opacity-50 hover:opacity-80 transition-opacity"
+                                onClick={() => setEditingSticky(null)}
+                              >
+                                취소
+                              </button>
+                              <button
+                                className="text-xs font-semibold transition-opacity hover:opacity-80"
+                                style={{ color: STICKY_COLORS[stickyColor]?.header ?? "#f59e0b" }}
+                                onClick={async () => {
+                                  if (!serverId) return;
+                                  const updated = await updateAnnotation(
+                                    serverId,
+                                    ann.id,
+                                    stickyText,
+                                    stickyColor,
+                                  );
+                                  if (updated) {
+                                    setAnnotations((prev) =>
+                                      prev.map((a) =>
+                                        a.id === ann.id ? updated : a,
+                                      ),
+                                    );
+                                  }
+                                  setEditingSticky(null);
+                                }}
+                              >
+                                저장
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  {/* Pending new note — only on current page */}
+                  {n === pageNumber && pendingSticky && (
+                    <div
+                      className="absolute z-20"
+                      style={{
+                        left: `${pendingSticky.xPct}%`,
+                        top: `${pendingSticky.yPct}%`,
+                        transform: "translate(-50%, 4px)",
+                      }}
                       onMouseDown={(e) => e.stopPropagation()}
                       onClick={(e) => e.stopPropagation()}
                     >
-                      <textarea
-                        className="w-full text-xs border border-gray-200 rounded p-1.5 resize-none focus:outline-none focus:ring-1 focus:ring-blue-400"
-                        rows={3}
-                        value={noteText}
-                        onChange={(e) => setNoteText(e.target.value)}
-                        autoFocus
-                      />
-                      <div className="flex gap-1.5">
-                        {["yellow", "pink", "green", "blue"].map((c) => (
+                      {/* Windows Sticky Note style */}
+                      <div
+                        className="rounded-lg shadow-2xl overflow-hidden flex flex-col"
+                        style={{ width: "220px", backgroundColor: STICKY_COLORS[stickyColor]?.body ?? "#fef9c3" }}
+                      >
+                        {/* Header bar */}
+                        <div
+                          className="flex items-center px-2 py-1.5 gap-1.5"
+                          style={{ backgroundColor: STICKY_COLORS[stickyColor]?.header ?? "#f59e0b" }}
+                        >
+                          {["yellow", "pink", "green", "blue"].map((c) => (
+                            <button
+                              key={c}
+                              onClick={() => setStickyColor(c)}
+                              className="w-3.5 h-3.5 rounded-full transition-transform hover:scale-110"
+                              style={{
+                                backgroundColor: STICKY_COLORS[c]?.body ?? "#fef9c3",
+                                outline: stickyColor === c ? "2px solid white" : "none",
+                                outlineOffset: "1px",
+                              }}
+                            />
+                          ))}
+                          <div className="flex-1" />
                           <button
-                            key={c}
-                            onClick={() => setNoteColor(c)}
-                            className={`w-5 h-5 rounded-full border-2 transition-transform ${noteColor === c ? "scale-125 border-gray-700" : "border-transparent"}`}
-                            style={{ backgroundColor: c === "yellow" ? "#fef08a" : c === "pink" ? "#fecdd3" : c === "green" ? "#bbf7d0" : "#bfdbfe" }}
-                          />
-                        ))}
-                      </div>
-                      <div className="flex gap-1.5 justify-end">
-                        <button
-                          className="text-xs text-red-500 hover:text-red-700 px-1.5 py-0.5"
-                          onClick={async () => {
-                            if (!serverId) return;
-                            await deleteAnnotation(serverId, ann.id);
-                            setAnnotations((prev) => prev.filter((a) => a.id !== ann.id));
-                            setEditingAnnot(null);
+                            className="text-white/80 hover:text-white transition-colors"
+                            title="닫기"
+                            onClick={() => setPendingSticky(null)}
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
+                              <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                            </svg>
+                          </button>
+                        </div>
+                        {/* Body */}
+                        <textarea
+                          className="w-full text-sm p-2.5 resize-none focus:outline-none bg-transparent leading-relaxed"
+                          rows={4}
+                          placeholder="메모 입력..."
+                          value={stickyText}
+                          onChange={(e) => setStickyText(e.target.value)}
+                          autoFocus
+                          onKeyDown={(e) => {
+                            if (e.key === "Escape") setPendingSticky(null);
                           }}
-                        >
-                          삭제
-                        </button>
-                        <button
-                          className="text-xs bg-gray-100 hover:bg-gray-200 px-2 py-0.5 rounded"
-                          onClick={() => setEditingAnnot(null)}
-                        >
-                          취소
-                        </button>
-                        <button
-                          className="text-xs bg-blue-500 text-white hover:bg-blue-600 px-2 py-0.5 rounded"
-                          onClick={async () => {
-                            if (!serverId) return;
-                            const updated = await updateAnnotation(serverId, ann.id, noteText, noteColor);
-                            if (updated) {
-                              setAnnotations((prev) => prev.map((a) => a.id === ann.id ? updated : a));
-                            }
-                            setEditingAnnot(null);
-                          }}
-                        >
-                          저장
-                        </button>
+                        />
+                        {/* Footer */}
+                        <div className="flex justify-end px-2 pb-2 gap-2">
+                          <button
+                            className="text-xs opacity-50 hover:opacity-80 transition-opacity"
+                            onClick={() => setPendingSticky(null)}
+                          >
+                            취소
+                          </button>
+                          <button
+                            className="text-xs font-semibold transition-opacity hover:opacity-80 disabled:opacity-30"
+                            style={{ color: STICKY_COLORS[stickyColor]?.header ?? "#f59e0b" }}
+                            disabled={!stickyText.trim()}
+                            onClick={async () => {
+                              if (!serverId || !stickyText.trim()) return;
+                              const created = await createAnnotation(
+                                serverId,
+                                pageNumber,
+                                pendingSticky.xPct,
+                                pendingSticky.yPct,
+                                stickyText.trim(),
+                                stickyColor,
+                              );
+                              if (created)
+                                setAnnotations((prev) => [...prev, created]);
+                              setPendingSticky(null);
+                              setStickyText("");
+                            }}
+                          >
+                            저장
+                          </button>
+                        </div>
                       </div>
                     </div>
                   )}
                 </div>
-              ))}
-              {/* Pending new note form */}
-              {pendingNote && (
-                <div
-                  className="absolute z-20"
-                  style={{
-                    left: `${pendingNote.xPct}%`,
-                    top: `${pendingNote.yPct}%`,
-                    transform: "translate(-50%, 4px)",
-                  }}
-                  onMouseDown={(e) => e.stopPropagation()}
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <div className="w-56 bg-white border border-gray-200 rounded-lg shadow-xl p-2 flex flex-col gap-2">
-                    <textarea
-                      className="w-full text-xs border border-gray-200 rounded p-1.5 resize-none focus:outline-none focus:ring-1 focus:ring-blue-400"
-                      rows={3}
-                      placeholder="메모 입력..."
-                      value={noteText}
-                      onChange={(e) => setNoteText(e.target.value)}
-                      autoFocus
-                    />
-                    <div className="flex gap-1.5">
-                      {["yellow", "pink", "green", "blue"].map((c) => (
-                        <button
-                          key={c}
-                          onClick={() => setNoteColor(c)}
-                          className={`w-5 h-5 rounded-full border-2 transition-transform ${noteColor === c ? "scale-125 border-gray-700" : "border-transparent"}`}
-                          style={{ backgroundColor: c === "yellow" ? "#fef08a" : c === "pink" ? "#fecdd3" : c === "green" ? "#bbf7d0" : "#bfdbfe" }}
-                        />
-                      ))}
-                    </div>
-                    <div className="flex gap-1.5 justify-end">
-                      <button
-                        className="text-xs bg-gray-100 hover:bg-gray-200 px-2 py-0.5 rounded"
-                        onClick={() => setPendingNote(null)}
-                      >
-                        취소
-                      </button>
-                      <button
-                        className="text-xs bg-blue-500 text-white hover:bg-blue-600 px-2 py-0.5 rounded disabled:opacity-50"
-                        disabled={!noteText.trim()}
-                        onClick={async () => {
-                          if (!serverId || !noteText.trim()) return;
-                          const created = await createAnnotation(
-                            serverId, pageNumber,
-                            pendingNote.xPct, pendingNote.yPct,
-                            noteText.trim(), noteColor,
-                          );
-                          if (created) setAnnotations((prev) => [...prev, created]);
-                          setPendingNote(null);
-                          setNoteText("");
-                        }}
-                      >
-                        저장
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
+              );
+            })}
           </Document>
-
         </div>
 
         {/* Floating bottom toolbar */}
@@ -2131,9 +1886,7 @@ function PdfViewerInner(
             {/* Zoom out */}
             <button
               onClick={() =>
-                setScale((s) =>
-                  Math.max(0.5, parseFloat((s - 0.1).toFixed(1))),
-                )
+                setScale((s) => Math.max(0.5, parseFloat((s - 0.1).toFixed(1))))
               }
               title="축소"
               className="p-1.5 rounded-md hover:bg-gray-100 transition-colors"
@@ -2175,9 +1928,7 @@ function PdfViewerInner(
             {/* Zoom in */}
             <button
               onClick={() =>
-                setScale((s) =>
-                  Math.min(2.0, parseFloat((s + 0.1).toFixed(1))),
-                )
+                setScale((s) => Math.min(2.0, parseFloat((s + 0.1).toFixed(1))))
               }
               title="확대"
               className="p-1.5 rounded-md hover:bg-gray-100 transition-colors"
@@ -2199,7 +1950,7 @@ function PdfViewerInner(
             <div className="w-px h-4 bg-gray-200 mx-0.5" />
             {/* Prev page */}
             <button
-              onClick={() => setPageNumber((p) => Math.max(1, p - 1))}
+              onClick={() => scrollToPage(pageNumber - 1)}
               disabled={pageNumber <= 1}
               title="이전 페이지"
               className="p-1.5 rounded-md hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
@@ -2238,8 +1989,7 @@ function PdfViewerInner(
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
                       const n = parseInt(pageInputStr ?? "", 10);
-                      if (!isNaN(n) && n >= 1 && n <= numPages)
-                        setPageNumber(n);
+                      if (!isNaN(n) && n >= 1 && n <= numPages) scrollToPage(n);
                       setPageInputStr(null);
                     } else if (e.key === "Escape") {
                       setPageInputStr(null);
@@ -2247,8 +1997,7 @@ function PdfViewerInner(
                   }}
                   onBlur={() => {
                     const n = parseInt(pageInputStr ?? "", 10);
-                    if (!isNaN(n) && n >= 1 && n <= numPages)
-                      setPageNumber(n);
+                    if (!isNaN(n) && n >= 1 && n <= numPages) scrollToPage(n);
                     setPageInputStr(null);
                   }}
                   className="w-8 text-center border border-blue-400 rounded focus:outline-none"
@@ -2258,7 +2007,7 @@ function PdfViewerInner(
             </div>
             {/* Next page */}
             <button
-              onClick={() => setPageNumber((p) => Math.min(numPages, p + 1))}
+              onClick={() => scrollToPage(pageNumber + 1)}
               disabled={pageNumber >= numPages}
               title="다음 페이지"
               className="p-1.5 rounded-md hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
@@ -2309,11 +2058,11 @@ function PdfViewerInner(
                 <div className="w-px h-4 bg-gray-200 mx-0.5" />
                 <button
                   onClick={() => {
-                    setIsNoteMode((v) => !v);
-                    setPendingNote(null);
+                    setIsStickyMode((v) => !v);
+                    setPendingSticky(null);
                   }}
-                  title={isNoteMode ? "메모 모드 끄기" : "메모 추가"}
-                  className={`p-1.5 rounded-md transition-colors ${isNoteMode ? "bg-yellow-100 text-yellow-700" : "hover:bg-gray-100"}`}
+                  title={isStickyMode ? "스티키 메모 끄기" : "스티키 메모 추가"}
+                  className={`p-1.5 rounded-md transition-colors ${isStickyMode ? "bg-yellow-100 text-yellow-700" : "hover:bg-gray-100"}`}
                 >
                   <svg
                     className="w-4 h-4"
@@ -2334,236 +2083,281 @@ function PdfViewerInner(
           </div>
         )}
 
-        {/* Hover popup */}
-        {hoverPopup && !popup && (
-          <div
-            id="pdf-hover-popup"
-            className="fixed z-40 bg-white border border-gray-200 rounded-xl shadow-md overflow-hidden flex"
-            style={{
-              left: Math.min(hoverPopup.x - 4, window.innerWidth - 220),
-              top:
-                hoverPopup.y - 52 < 8 ? hoverPopup.y + 20 : hoverPopup.y - 52,
-            }}
-            onMouseEnter={() => {
-              if (hoverHideTimer.current) clearTimeout(hoverHideTimer.current);
-            }}
-            onMouseLeave={() => {
-              hoverHideTimer.current = setTimeout(
-                () => setHoverPopup(null),
-                200,
-              );
-            }}
-          >
-            <button
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => speak(hoverPopup.text)}
-              className="px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50 active:bg-gray-200 active:scale-95 transition-all flex items-center gap-1.5"
-              title="소리 내어 읽기"
-            >
-              <svg
-                className="w-3.5 h-3.5"
-                fill="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z" />
-              </svg>
-              소리
-            </button>
-            <div className="w-px bg-gray-200" />
-            <button
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => {
-                navigator.clipboard.writeText(hoverPopup.text);
-                setHoverPopup(null);
-              }}
-              className="px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50 active:bg-gray-200 active:scale-95 transition-all flex items-center gap-1.5"
-              title="클립보드에 복사"
-            >
-              <svg
-                className="w-3.5 h-3.5"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"
-                />
-              </svg>
-              복사
-            </button>
-            <div className="w-px bg-gray-200" />
-            <button
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => {
-                onTextSelect({ text: hoverPopup.text, id: Date.now() });
-                setHoverPopup(null);
-              }}
-              className="px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-50 active:bg-blue-200 active:scale-95 transition-all flex items-center gap-1.5"
-              title="질문하기"
-            >
-              <svg
-                className="w-3.5 h-3.5"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"
-                />
-              </svg>
-              질문하기
-            </button>
-            <div className="w-px bg-gray-200" />
-            <button
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => {
-                setPracticePdfText(hoverPopup.text);
-                setHoverPopup(null);
-              }}
-              className="px-3 py-2 text-xs font-medium text-purple-700 hover:bg-purple-50 active:bg-purple-200 active:scale-95 transition-all flex items-center gap-1.5"
-              title="발음 연습"
-            >
-              <svg
-                className="w-3.5 h-3.5"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"
-                />
-              </svg>
-              연습
-            </button>
-          </div>
-        )}
-
         {/* Selection popup */}
         {popup && (
           <div
             id="pdf-selection-popup"
-            className="fixed z-50 bg-white border border-gray-200 rounded-xl shadow-md overflow-hidden flex flex-col"
+            className="fixed z-50 bg-white border border-gray-200 rounded-xl shadow-md overflow-hidden flex flex-col-reverse"
             style={{
-              left: Math.min(popup.x - 4, window.innerWidth - 320),
-              top: popup.y - 52 < 8 ? popup.y + 20 : popup.y - 52,
-            }}
-            onMouseLeave={(e) => {
-              hoverBlockOriginRef.current = { x: e.clientX, y: e.clientY };
-              setPopup(null);
-              setPopupTranslation(null);
-              window.getSelection()?.removeAllRanges();
+              left: popup.x,
+              bottom:
+                typeof window !== "undefined"
+                  ? window.innerHeight - popup.y + 16
+                  : 0,
+              transform: "translateX(-50%)",
             }}
           >
-          <div className="flex">
-            {/* 소리 */}
-            <button
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => speak(popup.text)}
-              className="px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50 active:bg-gray-200 active:scale-95 transition-all flex items-center gap-1.5"
-              title="소리 내어 읽기"
-            >
-              <svg
-                className="w-3.5 h-3.5"
-                fill="currentColor"
-                viewBox="0 0 24 24"
+            <div className="flex">
+              {/* 소리 */}
+              <button
+                onMouseDown={(e) => e.preventDefault()}
+                onMouseEnter={() => {
+                  setShowTtsPanel(true);
+                  setPopupTranslation(null);
+                }}
+                onClick={() => {
+                  if (!language) {
+                    setPendingLang(null);
+                    setShowLangModal(true);
+                    return;
+                  }
+                  if (speakWithOptions) {
+                    speakWithOptions(popup.text, {
+                      volume: tempVolume,
+                      rate: tempRate,
+                    });
+                  } else {
+                    speak(popup.text);
+                  }
+                }}
+                className="px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50 active:bg-gray-200 active:scale-95 transition-all flex items-center gap-1.5"
+                title={
+                  language ? "소리 내어 읽기" : "학습 언어를 먼저 선택하세요"
+                }
               >
-                <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z" />
-              </svg>
-              소리
-            </button>
-            <div className="w-px bg-gray-200" />
-            {/* 복사 */}
-            <button
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => {
-                navigator.clipboard.writeText(popup.text);
-                setPopup(null);
-                window.getSelection()?.removeAllRanges();
-              }}
-              className="px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50 active:bg-gray-200 active:scale-95 transition-all flex items-center gap-1.5"
-              title="클립보드에 복사"
-            >
-              <svg
-                className="w-3.5 h-3.5"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
+                <svg
+                  className="w-3.5 h-3.5"
+                  fill="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z" />
+                </svg>
+                소리
+              </button>
+              <div className="w-px bg-gray-200" />
+              {/* 복사 */}
+              <button
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  setShowTtsPanel(false);
+                  setPopupTranslation(null);
+                  navigator.clipboard.writeText(popup.text);
+                  window.getSelection()?.removeAllRanges();
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 1000);
+                }}
+                className={`px-3 py-2 text-xs font-medium transition-all flex items-center gap-1.5 ${copied ? "text-green-600 bg-green-50" : "text-gray-600 hover:bg-gray-50 active:bg-gray-200 active:scale-95"}`}
+                title="클립보드에 복사"
               >
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"
-                />
-              </svg>
-              복사
-            </button>
-            <div className="w-px bg-gray-200" />
-            {/* 질문하기 */}
-            <button
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={(e) => {
-                hoverBlockOriginRef.current = { x: e.clientX, y: e.clientY };
-                onTextSelect({ text: popup.text, id: Date.now() });
-                setPopup(null);
-                window.getSelection()?.removeAllRanges();
-              }}
-              className="px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-50 active:bg-blue-200 active:scale-95 transition-all flex items-center gap-1.5"
-              title="질문하기"
-            >
-              <svg
-                className="w-3.5 h-3.5"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
+                {copied ? (
+                  <svg
+                    className="w-3.5 h-3.5"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth={2.5}
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M5 13l4 4L19 7"
+                    />
+                  </svg>
+                ) : (
+                  <svg
+                    className="w-3.5 h-3.5"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                  >
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"
+                    />
+                  </svg>
+                )}
+                {copied ? "복사됨" : "복사"}
+              </button>
+              <div className="w-px bg-gray-200" />
+              {/* 번역 */}
+              <button
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={async () => {
+                  setShowTtsPanel(false);
+                  if (popupTranslation !== null) {
+                    setPopupTranslation(null);
+                    return;
+                  }
+                  setIsTranslating(true);
+                  try {
+                    const res = await fetch(
+                      `https://api.mymemory.translated.net/get?q=${encodeURIComponent(popup.text)}&langpair=de|ko`,
+                    );
+                    const data = await res.json();
+                    setPopupTranslation(
+                      data?.responseData?.translatedText ?? "번역 실패",
+                    );
+                  } catch {
+                    setPopupTranslation("번역 오류");
+                  } finally {
+                    setIsTranslating(false);
+                  }
+                }}
+                disabled={isTranslating}
+                className={`px-3 py-2 text-xs font-medium transition-all flex items-center gap-1.5 ${popupTranslation !== null ? "bg-green-50 text-green-700" : "text-green-700 hover:bg-green-50 active:bg-green-100 active:scale-95"} disabled:opacity-60`}
+                title="독일어 → 한국어 번역"
               >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-3 3z"
-                />
-              </svg>
-              질문하기
-            </button>
-            <div className="w-px bg-gray-200" />
-            {/* 연습 */}
-            <button
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => {
-                setPracticePdfText(popup.text);
-                setPopup(null);
-                window.getSelection()?.removeAllRanges();
-              }}
-              className="px-3 py-2 text-xs font-medium text-purple-700 hover:bg-purple-50 active:bg-purple-200 active:scale-95 transition-all flex items-center gap-1.5"
-              title="발음 연습"
-            >
-              <svg
-                className="w-3.5 h-3.5"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
+                <svg
+                  className="w-3.5 h-3.5"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M3 5h12M9 3v2m1.048 9.5A18.022 18.022 0 016.412 9m6.088 9h7M11 21l5-10 5 10M12.751 5C11.783 10.77 8.07 15.61 3 18.129"
+                  />
+                </svg>
+                {isTranslating ? "..." : "번역"}
+              </button>
+              <div className="w-px bg-gray-200" />
+              {/* 질문하기 */}
+              <button
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={(e) => {
+                  setShowTtsPanel(false);
+                  onTextSelect({ text: popup.text, id: Date.now() });
+                  setPopup(null);
+                  setPopupTranslation(null);
+                  setSelectionRects([]);
+                  window.getSelection()?.removeAllRanges();
+                }}
+                className="px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-50 active:bg-blue-200 active:scale-95 transition-all flex items-center gap-1.5"
+                title="질문하기"
               >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"
-                />
-              </svg>
-              연습
-            </button>
+                <svg
+                  className="w-3.5 h-3.5"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-3 3z"
+                  />
+                </svg>
+                질문하기
+              </button>
+              <div className="w-px bg-gray-200" />
+              {/* 연습 */}
+              <button
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  setShowTtsPanel(false);
+                  setPracticePdfText(popup.text);
+                  setPopup(null);
+                  setPopupTranslation(null);
+                  setSelectionRects([]);
+                  window.getSelection()?.removeAllRanges();
+                }}
+                className="px-3 py-2 text-xs font-medium text-purple-700 hover:bg-purple-50 active:bg-purple-200 active:scale-95 transition-all flex items-center gap-1.5"
+                title="발음 연습"
+              >
+                <svg
+                  className="w-3.5 h-3.5"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"
+                  />
+                </svg>
+                연습
+              </button>
+            </div>
+            {/* TTS controls row (shown on 소리 button hover) */}
+            {showTtsPanel && (
+              <>
+                <div className="h-px bg-gray-100" />
+                <div className="px-3 py-2 flex flex-col gap-1.5">
+                  <div className="flex items-center gap-2">
+                    <svg
+                      className="w-3 h-3 text-gray-400 shrink-0"
+                      fill="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z" />
+                    </svg>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      value={tempVolume}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onChange={(e) => setTempVolume(Number(e.target.value))}
+                      className="flex-1 h-1 accent-gray-500"
+                    />
+                    <span className="text-[10px] text-gray-500 w-7 text-right">
+                      {Math.round(tempVolume * 100)}%
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <svg
+                      className="w-3 h-3 text-gray-400 shrink-0"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                      strokeWidth={2}
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        d="M13 10V3L4 14h7v7l9-11h-7z"
+                      />
+                    </svg>
+                    <input
+                      type="range"
+                      min={0.5}
+                      max={2}
+                      step={0.05}
+                      value={tempRate}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onChange={(e) => setTempRate(Number(e.target.value))}
+                      className="flex-1 h-1 accent-gray-500"
+                    />
+                    <span className="text-[10px] text-gray-500 w-7 text-right">
+                      {tempRate.toFixed(1)}x
+                    </span>
+                  </div>
+                </div>
+              </>
+            )}
+            {/* Translation result row */}
+            {popupTranslation !== null && (
+              <>
+                <div className="h-px bg-gray-100" />
+                <div className="px-3 py-2 flex items-start gap-2 max-w-xs">
+                  <span className="text-[10px] text-green-600 font-semibold shrink-0 mt-0.5">
+                    KO
+                  </span>
+                  <p className="text-xs text-gray-800 leading-relaxed">
+                    {popupTranslation}
+                  </p>
+                </div>
+              </>
+            )}
           </div>
         )}
 
@@ -2580,45 +2374,76 @@ function PdfViewerInner(
 
         {/* Language selection modal */}
         {showLangModal && (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
-            onClick={() => setShowLangModal(false)}
-          >
-            <div
-              className="bg-white rounded-2xl shadow-xl w-80 p-5"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <h2 className="text-sm font-semibold text-gray-800 mb-1">학습 언어 선택</h2>
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+            <div className="bg-white rounded-2xl shadow-xl w-80 p-5">
+              {/* Header */}
+              <div className="flex items-start justify-between mb-1">
+                <h2 className="text-sm font-semibold text-gray-800">
+                  학습 언어 선택
+                </h2>
+                <button
+                  onClick={() => setShowLangModal(false)}
+                  className="p-0.5 rounded-md text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors -mt-0.5 -mr-0.5"
+                >
+                  <svg
+                    className="w-4 h-4"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M6 18L18 6M6 6l12 12"
+                    />
+                  </svg>
+                </button>
+              </div>
               <p className="text-xs text-gray-400 mb-4">
                 선택한 언어로 발음(TTS)이 재생됩니다.
               </p>
               <div className="grid grid-cols-2 gap-2">
-                {TTS_LANGUAGES.map((lang) => (
-                  <button
-                    key={lang.code}
-                    onClick={() => {
-                      onLanguageChange(lang.code);
-                      setShowLangModal(false);
-                    }}
-                    className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl border text-left transition-colors ${
-                      language === lang.code
-                        ? "border-blue-500 bg-blue-50 text-blue-700"
-                        : "border-gray-200 hover:border-gray-300 hover:bg-gray-50 text-gray-700"
-                    }`}
-                  >
-                    <span className="text-xl leading-none">{lang.flag}</span>
-                    <div className="min-w-0">
-                      <div className="text-xs font-medium truncate">{lang.label}</div>
-                      <div className="text-[10px] text-gray-400 truncate">{lang.name}</div>
-                    </div>
-                  </button>
-                ))}
+                {TTS_LANGUAGES.map((lang) => {
+                  const selected = (pendingLang ?? language) === lang.code;
+                  return (
+                    <button
+                      key={lang.code}
+                      onClick={() => setPendingLang(lang.code)}
+                      className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl border text-left transition-colors ${
+                        selected
+                          ? "border-blue-500 bg-blue-50 text-blue-700"
+                          : "border-gray-200 hover:border-gray-300 hover:bg-gray-50 text-gray-700"
+                      }`}
+                    >
+                      <span className="text-xl leading-none">{lang.flag}</span>
+                      <div className="min-w-0">
+                        <div className="text-xs font-medium truncate">
+                          {lang.label}
+                        </div>
+                        <div className="text-[10px] text-gray-400 truncate">
+                          {lang.name}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
               <button
-                onClick={() => setShowLangModal(false)}
-                className="mt-4 w-full py-2 text-xs text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-xl transition-colors"
+                onClick={() => {
+                  const lang = pendingLang ?? language;
+                  if (lang) {
+                    onLanguageChange(lang);
+                    if (serverId)
+                      savePdfLanguage(serverId, lang).catch(() => {});
+                  }
+                  setPendingLang(null);
+                  setShowLangModal(false);
+                }}
+                disabled={!pendingLang && !language}
+                className="mt-4 w-full py-2 text-xs font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl transition-colors"
               >
-                닫기
+                저장
               </button>
             </div>
           </div>

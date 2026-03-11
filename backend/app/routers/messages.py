@@ -3,6 +3,7 @@ Messages router.
 
 Endpoints:
   PATCH  /api/messages/{id}/feedback   Set or clear feedback on a message
+  DELETE /api/messages/{id}/truncate   Delete message and all subsequent messages
 """
 
 import logging
@@ -30,3 +31,20 @@ async def update_feedback(
     if not found:
         raise HTTPException(status_code=404, detail="Message not found")
     return {"ok": True}
+
+
+@router.delete("/messages/{message_id}/truncate")
+async def truncate_from_message(
+    message_id: UUID,
+    user_id: UUID = Depends(get_current_user),
+):
+    """Delete the given message and all subsequent messages in the same conversation.
+
+    Used by Retry/Edit to clean up DB history before re-sending.
+    Ownership is verified via the parent conversation's user_id.
+    """
+    repo = MessageRepository()
+    deleted = await repo.delete_from(user_id, message_id)
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail="Message not found")
+    return {"ok": True, "deleted": deleted}

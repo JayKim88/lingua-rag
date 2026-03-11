@@ -1,135 +1,114 @@
 """
-Tests for build_system_prompt() — FR-2 (dynamic system prompt assembly).
+Tests for build_system_prompt() — universal language tutor prompt.
 
 Coverage:
-  - All 6 layers of prompt structure
-  - Level-specific config (A1 / A2)
-  - Unit-specific content injection
-  - Constraint text for out-of-level rejection (FR-5)
-  - Fallback for unknown unit IDs (EC-2)
+  - Tutor role with language parameter
+  - Answer format rules
+  - RAG chunk injection
+  - Constraint text
+  - Prompt caching split (fixed prefix + dynamic suffix)
 """
 
 import pytest
 
-from app.data.prompts import build_system_prompt
-from app.data.units import DOKDOKDOK_A1
+from app.data.prompts import build_system_prompt, build_system_prompt_parts
 
 
 # ---------------------------------------------------------------------------
-# Layer 2: Level modifier
+# Tutor role
 # ---------------------------------------------------------------------------
 
-class TestLevelModifier:
-    def test_a1_level_label_in_prompt(self):
-        prompt = build_system_prompt("A1", "A1-1", None)
-        assert "A1" in prompt
+class TestTutorRole:
+    def test_language_in_prompt(self):
+        prompt = build_system_prompt("독일어")
+        assert "독일어" in prompt
 
-    def test_a2_level_label_in_prompt(self):
-        prompt = build_system_prompt("A2", "A1-1", None)
-        assert "A2" in prompt
+    def test_custom_language(self):
+        prompt = build_system_prompt("일본어")
+        assert "일본어" in prompt
 
-    def test_a2_grammar_in_modifier(self):
-        """A2 modifier should mention Dativ/Perfekt/Nebensatz."""
-        prompt = build_system_prompt("A2", "A1-1", None)
-        assert "Dativ" in prompt or "Perfekt" in prompt
+    def test_learner_language_default(self):
+        prompt = build_system_prompt("영어")
+        assert "한국어" in prompt
 
-    def test_a1_example_length_constraint(self):
-        """A1: max 10-word example sentences stated in prompt."""
-        prompt = build_system_prompt("A1", "A1-1", None)
-        assert "10단어" in prompt
-
-    def test_a2_example_length_constraint(self):
-        """A2: max 15-word example sentences stated in prompt."""
-        prompt = build_system_prompt("A2", "A1-1", None)
-        assert "15단어" in prompt
+    def test_custom_learner_language(self):
+        prompt = build_system_prompt("독일어", learner_language="영어")
+        assert "영어" in prompt
 
 
 # ---------------------------------------------------------------------------
-# Layer 3: 56-unit summary table
-# ---------------------------------------------------------------------------
-
-class TestUnitSummaryTable:
-    def test_first_unit_in_table(self):
-        prompt = build_system_prompt("A1", "A1-1", None)
-        assert "A1-1" in prompt
-
-    def test_last_unit_in_table(self):
-        """Full 56-unit table must include A1-56."""
-        prompt = build_system_prompt("A1", "A1-1", None)
-        assert "A1-56" in prompt
-
-    def test_midrange_unit_in_table(self):
-        prompt = build_system_prompt("A1", "A1-1", None)
-        assert "A1-28" in prompt
-
-
-# ---------------------------------------------------------------------------
-# Layer 4: Current unit detail
-# ---------------------------------------------------------------------------
-
-class TestUnitDetail:
-    def test_unit_id_appears_in_prompt(self):
-        unit_data = DOKDOKDOK_A1.get("A1-13")
-        prompt = build_system_prompt("A1", "A1-13", unit_data)
-        assert "A1-13" in prompt
-
-    def test_known_unit_title_injected(self):
-        """A1-12 '약속 잡기' title should appear when unit_data is passed."""
-        unit_data = DOKDOKDOK_A1.get("A1-12")
-        prompt = build_system_prompt("A1", "A1-12", unit_data)
-        assert "약속 잡기" in prompt
-
-    def test_unit_topics_injected(self):
-        """Topics list for A1-12 should appear in prompt."""
-        unit_data = DOKDOKDOK_A1.get("A1-12")
-        prompt = build_system_prompt("A1", "A1-12", unit_data)
-        # At least one topic from A1-12
-        assert any(topic in prompt for topic in unit_data["topics"])
-
-    def test_fallback_for_unknown_unit(self):
-        """EC-2: Unknown unit_id with no unit_data → fallback note."""
-        prompt = build_system_prompt("A1", "UNKNOWN-99", None)
-        assert "UNKNOWN-99" in prompt
-        assert "찾을 수 없습니다" in prompt
-
-    def test_no_unit_data_does_not_crash(self):
-        """Passing unit_data=None for a valid unit_id should not raise."""
-        prompt = build_system_prompt("A1", "A1-5", None)
-        assert isinstance(prompt, str)
-        assert len(prompt) > 0
-
-
-# ---------------------------------------------------------------------------
-# Layer 5: Answer format
+# Answer format
 # ---------------------------------------------------------------------------
 
 class TestAnswerFormat:
     def test_answer_format_section_present(self):
-        prompt = build_system_prompt("A1", "A1-1", None)
+        prompt = build_system_prompt("독일어")
         assert "답변 형식" in prompt
 
     def test_bold_rule_present(self):
-        """독일어 bold 규칙 must be stated."""
-        prompt = build_system_prompt("A1", "A1-1", None)
-        assert "bold" in prompt.lower() or "bold 규칙" in prompt or "**...**" in prompt
+        prompt = build_system_prompt("독일어")
+        assert "bold" in prompt.lower() or "**...**" in prompt
+
+    def test_table_prohibition(self):
+        prompt = build_system_prompt("독일어")
+        assert "표 금지" in prompt
 
 
 # ---------------------------------------------------------------------------
-# Layer 6: Constraints (FR-5)
+# Constraints
 # ---------------------------------------------------------------------------
 
 class TestConstraints:
-    def test_rejection_instruction_present_a1(self):
-        """FR-5: A1 prompt must instruct model to reject out-of-level questions."""
-        prompt = build_system_prompt("A1", "A1-1", None)
-        assert "거절" in prompt
-
-    def test_rejection_instruction_present_a2(self):
-        prompt = build_system_prompt("A2", "A1-1", None)
-        # A2 mentions simplified handling ("간단히 언급")
-        assert "제약" in prompt or "간단히" in prompt
-
     def test_encouragement_rule_present(self):
         """Tutor must not negatively evaluate learner."""
-        prompt = build_system_prompt("A1", "A1-1", None)
+        prompt = build_system_prompt("독일어")
         assert "부정적으로 평가" in prompt
+
+    def test_textbook_context_instruction(self):
+        prompt = build_system_prompt("독일어")
+        assert "교재 컨텍스트" in prompt
+
+
+# ---------------------------------------------------------------------------
+# RAG chunk injection
+# ---------------------------------------------------------------------------
+
+class TestRagInjection:
+    def test_rag_chunks_appear_in_prompt(self):
+        chunks = ["Guten Tag은 '좋은 날'이라는 뜻입니다.", "Wie geht es Ihnen?"]
+        prompt = build_system_prompt("독일어", rag_chunks=chunks)
+        assert "Guten Tag" in prompt
+        assert "Wie geht es Ihnen?" in prompt
+
+    def test_rag_section_header(self):
+        chunks = ["test chunk"]
+        prompt = build_system_prompt("독일어", rag_chunks=chunks)
+        assert "교재 원문 참고" in prompt
+
+    def test_no_rag_section_without_chunks(self):
+        prompt = build_system_prompt("독일어")
+        assert "교재 원문 참고" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Prompt caching split
+# ---------------------------------------------------------------------------
+
+class TestPromptCaching:
+    def test_returns_two_parts(self):
+        fixed, dynamic = build_system_prompt_parts("독일어")
+        assert isinstance(fixed, str)
+        assert isinstance(dynamic, str)
+
+    def test_fixed_prefix_contains_role(self):
+        fixed, _ = build_system_prompt_parts("독일어")
+        assert "튜터" in fixed
+
+    def test_dynamic_suffix_contains_rag(self):
+        chunks = ["chunk content"]
+        _, dynamic = build_system_prompt_parts("독일어", rag_chunks=chunks)
+        assert "chunk content" in dynamic
+
+    def test_dynamic_empty_without_rag(self):
+        _, dynamic = build_system_prompt_parts("독일어")
+        assert dynamic == ""

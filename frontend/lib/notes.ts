@@ -2,23 +2,23 @@ import { SavedNote } from "./types";
 
 function mapNote(n: {
   id: string;
-  unit_id: string;
-  unit_title: string;
+  pdf_id: string;
+  pdf_name: string;
   content: string;
   saved_at: string;
 }): SavedNote {
   return {
     id: n.id,
-    unitId: n.unit_id,
-    unitTitle: n.unit_title,
+    pdfId: n.pdf_id,
+    pdfName: n.pdf_name,
     content: n.content,
     savedAt: n.saved_at,
   };
 }
 
-export async function getNotes(unitId: string): Promise<SavedNote[]> {
+export async function getNotes(pdfId: string): Promise<SavedNote[]> {
   try {
-    const res = await fetch(`/api/notes?unit_id=${encodeURIComponent(unitId)}`);
+    const res = await fetch(`/api/notes?pdf_id=${encodeURIComponent(pdfId)}`);
     if (!res.ok) return [];
     const data = await res.json();
     return (data.notes ?? []).map(mapNote);
@@ -34,8 +34,8 @@ export async function saveNote(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      unit_id: note.unitId,
-      unit_title: note.unitTitle,
+      pdf_id: note.pdfId,
+      pdf_name: note.pdfName,
       content: note.content,
     }),
   });

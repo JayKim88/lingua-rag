@@ -6,24 +6,24 @@ import { SavedSummary } from "./types";
 
 function mapSummary(s: {
   id: string;
-  unit_id: string;
-  unit_title: string;
+  pdf_id: string;
+  pdf_name: string;
   content: string;
   saved_at: string;
 }): SavedSummary {
   return {
     id: s.id,
-    unitId: s.unit_id,
-    unitTitle: s.unit_title,
+    pdfId: s.pdf_id,
+    pdfName: s.pdf_name,
     content: s.content,
     savedAt: s.saved_at,
   };
 }
 
-export async function getSummaries(unitId: string): Promise<SavedSummary[]> {
+export async function getSummaries(pdfId: string): Promise<SavedSummary[]> {
   try {
     const res = await fetch(
-      `/api/summaries?unit_id=${encodeURIComponent(unitId)}`
+      `/api/summaries?pdf_id=${encodeURIComponent(pdfId)}`
     );
     if (!res.ok) return [];
     const data = await res.json();
@@ -40,8 +40,8 @@ export async function saveSummary(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      unit_id: summary.unitId,
-      unit_title: summary.unitTitle,
+      pdf_id: summary.pdfId,
+      pdf_name: summary.pdfName,
       content: summary.content,
     }),
   });

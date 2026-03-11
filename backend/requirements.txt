@@ -10,4 +10,5 @@ PyJWT==2.9.0
 cryptography>=43.0.0
 certifi>=2024.0.0
 openai>=1.0.0
+PyMuPDF>=1.24.0
 # pdfplumber: local-only (index_pdf.py), do not install on server

@@ -35,30 +35,27 @@ class ConversationRepository:
     async def get_or_create(
         self,
         user_id: UUID,
-        unit_id: str,
-        level: str,
-        textbook_id: str,
+        pdf_id: Optional[str] = None,
         force_new: bool = False,
     ) -> dict[str, Any]:
         """
-        Return the most recent conversation for (user, unit),
+        Return the most recent conversation for (user, pdf),
         or create a new one.
 
-        If force_new=True, always creates a new conversation thread
-        (used when unit changes mid-conversation per EC-2).
+        If force_new=True, always creates a new conversation thread.
         """
         pool = get_pool()
         async with pool.acquire() as conn:
-            if not force_new:
+            if not force_new and pdf_id:
                 record = await conn.fetchrow(
                     """
                     SELECT * FROM conversations
-                    WHERE user_id = $1 AND unit_id = $2
+                    WHERE user_id = $1 AND pdf_id = $2
                     ORDER BY created_at DESC
                     LIMIT 1
                     """,
                     user_id,
-                    unit_id,
+                    pdf_id,
                 )
                 if record:
                     return _record_to_dict(record)
@@ -67,15 +64,13 @@ class ConversationRepository:
             record = await conn.fetchrow(
                 """
                 INSERT INTO conversations
-                    (id, user_id, unit_id, textbook_id, level, created_at, updated_at)
+                    (id, user_id, pdf_id, created_at, updated_at)
                 VALUES
-                    (gen_random_uuid(), $1, $2, $3, $4, NOW(), NOW())
+                    (gen_random_uuid(), $1, $2, NOW(), NOW())
                 RETURNING *
                 """,
                 user_id,
-                unit_id,
-                textbook_id,
-                level,
+                pdf_id,
             )
         return _record_to_dict(record)
 
@@ -187,6 +182,35 @@ class MessageRepository:
             )
         return [_record_to_dict(r) for r in records]
 
+    async def delete_from(
+        self, user_id: UUID, message_id: UUID
+    ) -> int:
+        """Delete message with given ID and all subsequent messages in the same conversation.
+
+        Verifies ownership via the parent conversation's user_id.
+        Returns the number of deleted rows.
+        """
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                DELETE FROM messages
+                WHERE conversation_id = (
+                    SELECT m.conversation_id FROM messages m
+                    JOIN conversations c ON m.conversation_id = c.id
+                    WHERE m.id = $1 AND c.user_id = $2
+                )
+                AND created_at >= (
+                    SELECT created_at FROM messages WHERE id = $1
+                )
+                """,
+                message_id,
+                user_id,
+            )
+        # asyncpg returns "DELETE N" string
+        deleted = int(result.split()[-1]) if result else 0
+        return deleted
+
     async def update_feedback(
         self, user_id: UUID, message_id: UUID, feedback: str | None
     ) -> bool:
@@ -217,18 +241,18 @@ class MessageRepository:
 class SummaryRepository:
     """CRUD operations for summaries table."""
 
-    async def list_by_user_unit(self, user_id: UUID, unit_id: str) -> list[dict]:
-        """Return all summaries for a (user, unit), newest first."""
+    async def list_by_user_pdf(self, user_id: UUID, pdf_id: str) -> list[dict]:
+        """Return all summaries for a (user, pdf), newest first."""
         pool = get_pool()
         async with pool.acquire() as conn:
             records = await conn.fetch(
                 """
                 SELECT * FROM summaries
-                WHERE user_id = $1 AND unit_id = $2
+                WHERE user_id = $1 AND pdf_id = $2
                 ORDER BY saved_at DESC
                 """,
                 user_id,
-                unit_id,
+                pdf_id,
             )
         return [_record_to_dict(r) for r in records]
 
@@ -238,13 +262,13 @@ class SummaryRepository:
         async with pool.acquire() as conn:
             record = await conn.fetchrow(
                 """
-                INSERT INTO summaries (id, user_id, unit_id, unit_title, content, saved_at)
+                INSERT INTO summaries (id, user_id, pdf_id, pdf_name, content, saved_at)
                 VALUES (gen_random_uuid(), $1, $2, $3, $4, NOW())
                 RETURNING *
                 """,
                 user_id,
-                body.unit_id,
-                body.unit_title,
+                body.pdf_id,
+                body.pdf_name,
                 body.content,
             )
         return _record_to_dict(record)
@@ -264,18 +288,18 @@ class SummaryRepository:
 class NoteRepository:
     """CRUD operations for notes table."""
 
-    async def list_by_user_unit(self, user_id: UUID, unit_id: str) -> list[dict]:
-        """Return all notes for a (user, unit), newest first."""
+    async def list_by_user_pdf(self, user_id: UUID, pdf_id: str) -> list[dict]:
+        """Return all notes for a (user, pdf), newest first."""
         pool = get_pool()
         async with pool.acquire() as conn:
             records = await conn.fetch(
                 """
                 SELECT * FROM notes
-                WHERE user_id = $1 AND unit_id = $2
+                WHERE user_id = $1 AND pdf_id = $2
                 ORDER BY saved_at DESC
                 """,
                 user_id,
-                unit_id,
+                pdf_id,
             )
         return [_record_to_dict(r) for r in records]
 
@@ -285,13 +309,13 @@ class NoteRepository:
         async with pool.acquire() as conn:
             record = await conn.fetchrow(
                 """
-                INSERT INTO notes (id, user_id, unit_id, unit_title, content, saved_at)
+                INSERT INTO notes (id, user_id, pdf_id, pdf_name, content, saved_at)
                 VALUES (gen_random_uuid(), $1, $2, $3, $4, NOW())
                 RETURNING *
                 """,
                 user_id,
-                body.unit_id,
-                body.unit_title,
+                body.pdf_id,
+                body.pdf_name,
                 body.content,
             )
         return _record_to_dict(record)
@@ -324,6 +348,19 @@ class AnnotationRepository:
             )
         return [_record_to_dict(r) for r in records]
 
+    async def list_all(self, user_id: UUID, pdf_id: str) -> list[dict]:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            records = await conn.fetch(
+                """
+                SELECT * FROM pdf_annotations
+                WHERE user_id = $1 AND pdf_id = $2
+                ORDER BY page_num ASC, created_at ASC
+                """,
+                user_id, pdf_id,
+            )
+        return [_record_to_dict(r) for r in records]
+
     async def create(self, user_id: UUID, pdf_id: str, page_num: int,
                      x_pct: float, y_pct: float, text: str, color: str) -> dict:
         pool = get_pool()
@@ -339,16 +376,34 @@ class AnnotationRepository:
             )
         return _record_to_dict(record)
 
-    async def update(self, user_id: UUID, ann_id: UUID, text: str, color: str) -> dict | None:
+    async def update(
+        self,
+        user_id: UUID,
+        ann_id: UUID,
+        text: str | None = None,
+        color: str | None = None,
+        x_pct: float | None = None,
+        y_pct: float | None = None,
+    ) -> dict | None:
+        sets: list[str] = []
+        params: list = []
+        idx = 1
+        if text is not None:
+            sets.append(f"text = ${idx}"); params.append(text); idx += 1
+        if color is not None:
+            sets.append(f"color = ${idx}"); params.append(color); idx += 1
+        if x_pct is not None:
+            sets.append(f"x_pct = ${idx}"); params.append(x_pct); idx += 1
+        if y_pct is not None:
+            sets.append(f"y_pct = ${idx}"); params.append(y_pct); idx += 1
+        if not sets:
+            return None
+        params.extend([ann_id, user_id])
         pool = get_pool()
         async with pool.acquire() as conn:
             record = await conn.fetchrow(
-                """
-                UPDATE pdf_annotations SET text = $1, color = $2
-                WHERE id = $3 AND user_id = $4
-                RETURNING *
-                """,
-                text, color, ann_id, user_id,
+                f"UPDATE pdf_annotations SET {', '.join(sets)} WHERE id = ${idx} AND user_id = ${idx + 1} RETURNING *",
+                *params,
             )
         return _record_to_dict(record) if record else None
 
@@ -362,75 +417,100 @@ class AnnotationRepository:
         return result != "DELETE 0"
 
 
+class PdfFileRepository:
+    """CRUD for pdf_files metadata table.
+
+    SQL migration (run once in Supabase SQL editor):
+      CREATE TABLE IF NOT EXISTS pdf_files (
+        id TEXT PRIMARY KEY,
+        user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        size BIGINT NOT NULL,
+        total_pages INTEGER NOT NULL DEFAULT 0,
+        language TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_pdf_files_user_id ON pdf_files(user_id);
+
+      -- If the table already exists, add columns:
+      ALTER TABLE pdf_files ADD COLUMN IF NOT EXISTS language TEXT;
+      ALTER TABLE pdf_files ADD COLUMN IF NOT EXISTS last_page INTEGER NOT NULL DEFAULT 1;
+    """
+
+    async def create(self, user_id: UUID, pdf_id: str, name: str, size: int, total_pages: int) -> dict:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            record = await conn.fetchrow(
+                """
+                INSERT INTO pdf_files (id, user_id, name, size, total_pages, created_at)
+                VALUES ($1, $2, $3, $4, $5, NOW())
+                RETURNING *
+                """,
+                pdf_id, user_id, name, size, total_pages,
+            )
+        return _record_to_dict(record)
+
+    async def list_by_user(self, user_id: UUID) -> list[dict]:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            records = await conn.fetch(
+                "SELECT * FROM pdf_files WHERE user_id = $1 ORDER BY created_at DESC",
+                user_id,
+            )
+        return [_record_to_dict(r) for r in records]
+
+    async def get(self, user_id: UUID, pdf_id: str) -> dict | None:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            record = await conn.fetchrow(
+                "SELECT * FROM pdf_files WHERE id = $1 AND user_id = $2",
+                pdf_id, user_id,
+            )
+        return _record_to_dict(record) if record else None
+
+    async def update_language(self, user_id: UUID, pdf_id: str, language: str | None) -> bool:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                "UPDATE pdf_files SET language = $1 WHERE id = $2 AND user_id = $3",
+                language, pdf_id, user_id,
+            )
+        return result != "UPDATE 0"
+
+    async def update_last_page(self, user_id: UUID, pdf_id: str, last_page: int) -> bool:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                "UPDATE pdf_files SET last_page = $1 WHERE id = $2 AND user_id = $3",
+                last_page, pdf_id, user_id,
+            )
+        return result != "UPDATE 0"
+
+    async def delete(self, user_id: UUID, pdf_id: str) -> bool:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM pdf_files WHERE id = $1 AND user_id = $2",
+                pdf_id, user_id,
+            )
+        return result != "DELETE 0"
+
+
 class VectorSearchRepository:
-    """pgvector similarity search for RAG (v0.2)."""
+    """pgvector similarity search for RAG."""
 
     async def search(
         self,
         query_embedding: list[float],
-        textbook_id: str = "dokdokdok-a1",
-        unit_id: Optional[str] = None,
+        pdf_id: str,
         limit: int = 3,
         max_distance: float = 0.7,
     ) -> list[dict[str, Any]]:
         """
-        Return document chunks most similar to query_embedding.
+        Return document chunks most similar to query_embedding for a given PDF.
 
         Uses cosine distance (<=>). Lower distance = more similar.
         Chunks with distance >= max_distance are excluded.
-        If unit_id is given, only searches within that unit.
-        """
-        pool = get_pool()
-        # asyncpg passes vectors as cast strings
-        embedding_str = f"[{','.join(map(str, query_embedding))}]"
-
-        async with pool.acquire() as conn:
-            if unit_id:
-                records = await conn.fetch(
-                    """
-                    SELECT content, metadata,
-                           embedding <=> $1::vector AS distance
-                    FROM document_chunks
-                    WHERE textbook_id = $2
-                      AND unit_id = $3
-                      AND embedding <=> $1::vector < $4
-                    ORDER BY distance
-                    LIMIT $5
-                    """,
-                    embedding_str,
-                    textbook_id,
-                    unit_id,
-                    max_distance,
-                    limit,
-                )
-            else:
-                records = await conn.fetch(
-                    """
-                    SELECT content, metadata,
-                           embedding <=> $1::vector AS distance
-                    FROM document_chunks
-                    WHERE textbook_id = $2
-                      AND embedding <=> $1::vector < $3
-                    ORDER BY distance
-                    LIMIT $4
-                    """,
-                    embedding_str,
-                    textbook_id,
-                    max_distance,
-                    limit,
-                )
-        return [_record_to_dict(r) for r in records]
-
-    async def search_vocabulary(
-        self,
-        query_embedding: list[float],
-        textbook_id: str = "wortliste-a1",
-        limit: int = 2,
-        max_distance: float = 0.65,
-    ) -> list[dict[str, Any]]:
-        """
-        Search vocabulary-only textbooks (no unit filter).
-        Stricter max_distance (0.65) to avoid low-quality matches.
         """
         pool = get_pool()
         embedding_str = f"[{','.join(map(str, query_embedding))}]"
@@ -441,13 +521,13 @@ class VectorSearchRepository:
                 SELECT content, metadata,
                        embedding <=> $1::vector AS distance
                 FROM document_chunks
-                WHERE textbook_id = $2
+                WHERE pdf_id = $2
                   AND embedding <=> $1::vector < $3
                 ORDER BY distance
                 LIMIT $4
                 """,
                 embedding_str,
-                textbook_id,
+                pdf_id,
                 max_distance,
                 limit,
             )

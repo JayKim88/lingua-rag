@@ -25,7 +25,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
 from app.core.config import settings
-from app.db.repositories import ConversationRepository, MessageRepository, VectorSearchRepository
+from app.db.repositories import ConversationRepository, MessageRepository, PdfFileRepository, VectorSearchRepository
 from app.deps.auth import get_current_user
 from app.models.schemas import ChatRequest
 from app.services.claude_service import ClaudeService
@@ -78,17 +78,13 @@ async def chat_endpoint(
     Accept a chat message and stream Claude's response via SSE.
 
     Flow:
-    1. Resolve or create conversation for (user, unit)
+    1. Resolve or create conversation for (user, pdf)
     2. Acquire per-user lock (FR-5)
     3. [INSIDE lock] Fetch last 10 messages as history context
     4. [INSIDE lock] Persist user message
     5. [INSIDE lock] Stream from Claude
     6. [INSIDE lock] Persist assistant message on stream completion
     7. Emit done / error events
-
-    History fetch and user-message persist are intentionally inside the lock
-    so that two concurrent requests for the same user cannot race on the
-    history snapshot, ensuring Claude always sees a consistent conversation.
     """
     conv_repo = ConversationRepository()
     msg_repo = MessageRepository()
@@ -98,15 +94,11 @@ async def chat_endpoint(
     # ------------------------------------------------------------------
     # 1. Conversation resolution
     # ------------------------------------------------------------------
-    unit_id = body.unit_id or "A1-1"
-    level = body.level or "A1"
-    textbook_id = body.textbook_id or "dokdokdok-a1"
+    pdf_id = body.pdf_id
 
     conversation = await conv_repo.get_or_create(
         user_id=user_id,
-        unit_id=unit_id,
-        level=level,
-        textbook_id=textbook_id,
+        pdf_id=pdf_id,
         force_new=body.force_new_conversation,
     )
     conversation_id: UUID = conversation["id"]
@@ -135,52 +127,37 @@ async def chat_endpoint(
                 content=body.message,
             )
 
-            # RAG: embed user message → search similar chunks → inject context
-            # Two searches run in parallel:
-            #   1. Unit-scoped textbook search (top 2) — lesson-specific content
-            #   2. WORTLISTE vocabulary search (top 2, stricter threshold) — vocabulary reference
+            # RAG: embed user message → search similar chunks from the user's PDF
             rag_chunks: list[str] = []
-            if settings.RAG_ENABLED:
+            if settings.RAG_ENABLED and pdf_id:
                 try:
-                    import asyncio as _asyncio
                     embedding_svc = get_embedding_service()
                     query_vec = await embedding_svc.embed(body.message)
-                    textbook_results, vocab_results = await _asyncio.gather(
-                        vector_repo.search(
-                            query_embedding=query_vec,
-                            textbook_id=textbook_id,
-                            unit_id=unit_id,
-                            limit=2,
-                        ),
-                        vector_repo.search_vocabulary(
-                            query_embedding=query_vec,
-                            textbook_id="wortliste-a1",
-                            limit=2,
-                        ),
-                        return_exceptions=True,
+                    results = await vector_repo.search(
+                        query_embedding=query_vec,
+                        pdf_id=pdf_id,
+                        limit=3,
                     )
-                    if not isinstance(textbook_results, Exception):
-                        rag_chunks.extend(r["content"] for r in textbook_results)
-                    if not isinstance(vocab_results, Exception):
-                        rag_chunks.extend(r["content"] for r in vocab_results)
+                    rag_chunks.extend(r["content"] for r in results)
                     if rag_chunks:
-                        logger.info(
-                            "RAG: %d textbook + %d vocab chunks for unit %s",
-                            0 if isinstance(textbook_results, Exception) else len(textbook_results),
-                            0 if isinstance(vocab_results, Exception) else len(vocab_results),
-                            unit_id,
-                        )
+                        logger.info("RAG: %d chunks for pdf %s", len(results), pdf_id)
                 except Exception as exc:
                     logger.warning("RAG search failed, using base prompt: %s", exc)
+
+            # Resolve language for the PDF (if available)
+            language = "독일어"  # default fallback
+            if pdf_id:
+                pdf_repo = PdfFileRepository()
+                pdf_meta = await pdf_repo.get(user_id, pdf_id)
+                if pdf_meta and pdf_meta.get("language"):
+                    language = pdf_meta["language"]
 
             # 5. Stream from Claude
             try:
                 async for event in claude_svc.stream(
                     user_message=body.message,
                     history=history,
-                    unit_id=unit_id,
-                    level=level,
-                    textbook_id=textbook_id,
+                    language=language,
                     rag_chunks=rag_chunks or None,
                     page_image=body.page_image or None,
                     page_text=body.page_text or None,
@@ -191,8 +168,8 @@ async def chat_endpoint(
                     elif event["type"] == "usage":
                         output_tokens = event["output_tokens"]
                         logger.info(
-                            "Token usage — unit=%s out=%d in=%d cache_read=%d cache_write=%d",
-                            unit_id,
+                            "Token usage — pdf=%s out=%d in=%d cache_read=%d cache_write=%d",
+                            pdf_id,
                             event["output_tokens"],
                             event["input_tokens"],
                             event["cache_read_tokens"],
@@ -202,6 +179,11 @@ async def chat_endpoint(
                         was_truncated = True
                         yield _sse(event)
                     elif event["type"] == "error":
+                        await msg_repo.create(
+                            conversation_id=conversation_id,
+                            role="assistant",
+                            content=event.get("message", "오류가 발생했습니다."),
+                        )
                         yield _sse(event)
                         yield _sse_done()
                         return
@@ -227,12 +209,16 @@ async def chat_endpoint(
                 )
             except Exception as exc:
                 logger.exception("Unhandled error in event_generator: %s", exc)
-                yield _sse(
-                    {
-                        "type": "error",
-                        "message": "서버에서 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
-                    }
-                )
+                error_message = "서버에서 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+                try:
+                    await msg_repo.create(
+                        conversation_id=conversation_id,
+                        role="assistant",
+                        content=error_message,
+                    )
+                except Exception:
+                    logger.exception("Failed to save error message to DB")
+                yield _sse({"type": "error", "message": error_message})
             finally:
                 yield _sse_done()
 

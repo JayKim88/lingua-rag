@@ -10,22 +10,21 @@ async function getSession() {
 }
 
 export async function GET(
-  req: NextRequest,
+  _req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
   const session = await getSession();
   if (!session) return new Response("Unauthorized", { status: 401 });
 
-  const res = await fetch(
-    `${BACKEND_URL}/api/pdfs/${id}/annotations`,
-    { headers: { Authorization: `Bearer ${session.access_token}` } },
-  );
+  const res = await fetch(`${BACKEND_URL}/api/pdfs/${id}/last-page`, {
+    headers: { Authorization: `Bearer ${session.access_token}` },
+  });
   const data = await res.json();
   return Response.json(data, { status: res.status });
 }
 
-export async function POST(
+export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -34,8 +33,8 @@ export async function POST(
   if (!session) return new Response("Unauthorized", { status: 401 });
 
   const body = await req.json();
-  const res = await fetch(`${BACKEND_URL}/api/pdfs/${id}/annotations`, {
-    method: "POST",
+  const res = await fetch(`${BACKEND_URL}/api/pdfs/${id}/last-page`, {
+    method: "PATCH",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${session.access_token}`,

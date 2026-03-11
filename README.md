@@ -1,6 +1,37 @@
 # LinguaRAG
 
-독독독 A1 독일어 교재 기반 AI 튜터 앱. Google 계정으로 로그인한 뒤 단원을 선택하면 Claude가 해당 단원의 문법과 어휘를 실시간 스트리밍으로 설명합니다.
+유저가 자신의 언어 교재 PDF를 업로드하면, AI가 해당 교재 내용을 기반으로 학습을 도와주는 범용 AI 튜터 앱. Google 계정으로 로그인한 뒤 PDF를 선택하면 Claude가 RAG 기반으로 문법과 어휘를 실시간 스트리밍으로 설명합니다.
+
+## 주요 기능
+
+### AI 튜터 채팅
+- **RAG 기반 Q&A** — 업로드한 PDF 교재 내용을 근거로 답변 (pgvector cosine 유사도 검색)
+- **실시간 스트리밍** — Claude SSE 스트리밍으로 토큰 단위 실시간 응답
+- **페이지 컨텍스트** — "이 페이지" 키워드 감지 시 현재 보고 있는 페이지 텍스트를 자동 전달
+- **대화 이력 유지** — PDF별로 대화 스레드 분리, 최근 10개 메시지 히스토리 주입
+- **학습 요약** — 대화 내용을 어휘/문법/핵심 문장으로 자동 정리
+- **메시지 피드백** — 👍/👎 평가로 응답 품질 추적
+- **재시도** — 특정 메시지부터 다시 질문 (이후 메시지 DB에서 삭제)
+
+### PDF 뷰어
+- **서버 기반 PDF 관리** — Supabase Storage 업로드/다운로드, 메타데이터 DB 저장
+- **주석 (Sticky Notes)** — 페이지 위 클릭으로 메모 추가, 드래그 이동, 색상 변경
+- **마지막 페이지 기억** — PDF 재진입 시 마지막으로 본 페이지에서 이어보기
+- **텍스트 선택 팝업** — PDF 텍스트 드래그 시 "AI에게 질문" / "TTS 발음 듣기" 팝업
+
+### 다국어 지원
+- **범용 언어 튜터** — PDF별로 학습 언어 설정 (독일어, 영어, 일본어 등 제한 없음)
+- **TTS 발음 재생** — Web Speech API 기반 다국어 발음, 단어/문장 선택 재생
+- **발음 모달** — 선택한 텍스트의 발음을 반복 청취
+
+### 학습 관리
+- **노트 저장** — 채팅 중 중요한 응답을 노트로 저장, PDF별 분류
+- **요약 저장** — AI 학습 요약을 별도 저장, 나중에 복습
+- **PDF 사이드바** — 업로드한 PDF 목록에서 빠르게 전환
+
+### 인증 및 보안
+- **Google OAuth** — Supabase Auth 기반 소셜 로그인
+- **JWT 프록시** — 브라우저 → Next.js API Route → FastAPI, JWT는 서버 사이드에서만 전달
 
 ## 아키텍처
 
@@ -20,9 +51,10 @@ graph TB
         Proxy["API Route Proxy\n/app/api/chat/route.ts\nJWT Bearer 주입"]
     end
 
-    subgraph Supabase["Supabase (Auth)"]
+    subgraph Supabase["Supabase (Auth + Storage)"]
         SupaAuth["Auth Service\nGoogle OAuth"]
         JWKS["JWKS Endpoint\n/.well-known/jwks.json"]
+        Storage["Storage\n(PDF 파일 저장)"]
     end
 
     Google["Google\n(OAuth Provider)"]
@@ -36,6 +68,7 @@ graph TB
         end
         subgraph Routers["Routers"]
             ChatRouter["POST /api/chat"]
+            PdfRouter["GET/POST /api/pdfs"]
             ConvRouter["GET /api/conversations"]
             HealthRouter["GET /api/health"]
         end
@@ -43,9 +76,10 @@ graph TB
     end
 
     subgraph DB["Render PostgreSQL"]
-        Conversations["conversations\n(user_id → Supabase UUID)"]
+        PdfFiles["pdf_files\n(id, user_id, name, language)"]
+        Conversations["conversations\n(user_id, pdf_id)"]
         Messages["messages"]
-        Chunks["document_chunks\n(pgvector · 186청크)"]
+        Chunks["document_chunks\n(pgvector · pdf_id scope)"]
     end
 
     Claude["Claude claude-sonnet-4-6\n(Anthropic API)"]
@@ -62,7 +96,7 @@ graph TB
     ChatRouter --> EmbedSvc
     EmbedSvc -->|"embed(message)"| OpenAI
     OpenAI -->|"vector(1536)"| EmbedSvc
-    EmbedSvc -->|"cosine search\n(unit_id scope)"| Chunks
+    EmbedSvc -->|"cosine search\n(pdf_id scope)"| Chunks
     Chunks -->|"top-3 chunks"| ChatRouter
     ChatRouter --> ClaudeSvc
     ChatRouter <--> Conversations
@@ -130,7 +164,7 @@ sequenceDiagram
     alt 스트리밍 중
         Hook->>Hook: 큐에 추가 (queueSize++)
     else 대기 중
-        Hook->>Proxy: POST /api/chat<br/>{message, unit_id, level}
+        Hook->>Proxy: POST /api/chat<br/>{message, pdf_id}
         Proxy->>API: POST /api/chat<br/>Authorization: Bearer JWT
         API->>API: JWT 검증 → user_id 추출
         API->>DB: 대화 조회/생성 (conversations)
@@ -140,7 +174,7 @@ sequenceDiagram
 
         API->>OAI: embed(message) → vector(1536)
         OAI-->>API: embedding vector
-        API->>DB: pgvector cosine search<br/>(unit_id scope, max_distance=0.7, top-3)
+        API->>DB: pgvector cosine search<br/>(pdf_id scope, max_distance=0.7, top-3)
         DB-->>API: RAG chunks (교재 원문)
 
         API->>LLM: streaming API 호출<br/>(system prompt + RAG chunks + history + message)
@@ -170,12 +204,21 @@ sequenceDiagram
 
 ```mermaid
 erDiagram
+    pdf_files {
+        TEXT id PK
+        UUID user_id "Supabase auth.users.id"
+        TEXT name
+        BIGINT size
+        INTEGER total_pages
+        TEXT language "학습 대상 언어"
+        INTEGER last_page
+        TIMESTAMPTZ created_at
+    }
+
     conversations {
         UUID id PK
         UUID user_id "Supabase auth.users.id"
-        VARCHAR unit_id
-        VARCHAR textbook_id
-        VARCHAR level
+        TEXT pdf_id FK
         TIMESTAMPTZ created_at
         TIMESTAMPTZ updated_at
     }
@@ -186,21 +229,57 @@ erDiagram
         VARCHAR role
         TEXT content
         INTEGER token_count
+        BOOLEAN rag_hit
+        VARCHAR feedback "up / down"
         TIMESTAMPTZ created_at
     }
 
-    conversations ||--o{ messages : "1 대화 : N 메시지"
-
     document_chunks {
         UUID id PK
-        VARCHAR textbook_id "dokdokdok-a1"
-        VARCHAR unit_id "NULL = 단원 무관 콘텐츠"
+        TEXT pdf_id
         INTEGER chunk_index
         TEXT content
         VECTOR_1536 embedding "text-embedding-3-small"
         JSONB metadata "page_start, page_end"
         TIMESTAMPTZ created_at
     }
+
+    summaries {
+        UUID id PK
+        UUID user_id
+        TEXT pdf_id
+        TEXT pdf_name
+        TEXT content
+        TIMESTAMPTZ saved_at
+    }
+
+    notes {
+        UUID id PK
+        UUID user_id
+        TEXT pdf_id
+        TEXT pdf_name
+        TEXT content
+        TIMESTAMPTZ saved_at
+    }
+
+    pdf_annotations {
+        UUID id PK
+        UUID user_id
+        TEXT pdf_id
+        INTEGER page_num
+        FLOAT x_pct
+        FLOAT y_pct
+        TEXT text
+        VARCHAR color
+        TIMESTAMPTZ created_at
+    }
+
+    pdf_files ||--o{ conversations : "1 PDF : N 대화"
+    pdf_files ||--o{ document_chunks : "1 PDF : N 청크"
+    pdf_files ||--o{ summaries : "1 PDF : N 요약"
+    pdf_files ||--o{ notes : "1 PDF : N 노트"
+    pdf_files ||--o{ pdf_annotations : "1 PDF : N 주석"
+    conversations ||--o{ messages : "1 대화 : N 메시지"
 ```
 
 ## 기술 스택
@@ -209,22 +288,21 @@ erDiagram
 |--------|------|
 | Frontend | Next.js 15, React 19, TypeScript, Tailwind CSS |
 | Auth | Supabase Auth (Google OAuth, JWT ES256) |
-| Backend | FastAPI, Python 3.11, asyncpg |
+| Backend | FastAPI, Python 3.13, asyncpg |
 | AI | Claude claude-sonnet-4-6 (Anthropic SSE Streaming) |
 | RAG | OpenAI `text-embedding-3-small` + pgvector (cosine 유사도 검색) |
 | DB | PostgreSQL (pgcrypto, pgvector, asyncpg) |
+| Storage | Supabase Storage (PDF 파일) |
 | Deploy | Vercel (Frontend) + Render (Backend + DB) |
 
 ## 유저 플로우
 
 ```
-/login  →  Google OAuth  →  /  (레벨 선택)  →  /setup  (단원 선택)  →  /chat
+/login  →  Google OAuth  →  /chat  (PDF 선택 + 채팅)
 ```
 
 - `/login` — Google 로그인, 미인증 시 모든 경로에서 리다이렉트
-- `/` — A1 / A2 레벨 선택 (재방문 시 마지막 단원으로 바로 이동)
-- `/setup` — 독독독 교재 단원 선택 (Band 탭 + 라디오 리스트)
-- `/chat` — 단원별 대화 패널, 사이드바 단원 전환, TTS 발음 재생
+- `/chat` — PDF 목록 사이드바 + PDF 뷰어 + 채팅 패널, TTS 발음 재생, 주석/요약/노트 관리
 
 ## 프로젝트 구조
 
@@ -232,39 +310,45 @@ erDiagram
 lingua-rag/
 ├── backend/
 │   ├── app/
-│   │   ├── core/          # config (Settings), constants
-│   │   ├── data/          # 독독독 A1 56개 단원 데이터, 시스템 프롬프트
+│   │   ├── core/          # config (Settings), storage (Supabase Storage 클라이언트)
+│   │   ├── data/          # 범용 시스템 프롬프트 빌더
 │   │   ├── db/            # asyncpg 커넥션 풀, 레포지토리
 │   │   ├── deps/          # auth.py — Supabase JWKS JWT 검증
 │   │   ├── models/        # Pydantic v2 스키마
-│   │   ├── routers/       # chat, conversations, health 엔드포인트
+│   │   ├── routers/       # chat, conversations, pdfs, summaries, notes 엔드포인트
 │   │   ├── services/      # ClaudeService (SSE), EmbeddingService (OpenAI)
 │   │   └── main.py        # FastAPI 앱, CORS, lifespan
-│   ├── scripts/
-│   │   └── index_pdf.py   # PDF → 청크 → OpenAI 임베딩 → Supabase 인덱싱
-│   ├── schema.sql          # DB 초기화 스크립트 (conversations, messages, document_chunks)
+│   ├── migrations/        # DB 마이그레이션 SQL
+│   ├── scripts/           # 오프라인 PDF 인덱싱 스크립트
+│   ├── tests/             # pytest 테스트
 │   ├── requirements.txt
-│   ├── Dockerfile          # Render 배포용
+│   ├── Dockerfile         # Render 배포용
 │   └── .env.example
 └── frontend/
     ├── app/
     │   ├── api/            # Next.js → FastAPI 프록시 (JWT 주입)
     │   │   ├── chat/       # POST — SSE 스트림 프록시
     │   │   ├── conversations/  # GET — 대화 목록/메시지
+    │   │   ├── pdfs/       # PDF 업로드/목록/주석/언어 설정
+    │   │   ├── summaries/  # 학습 요약 CRUD
+    │   │   ├── notes/      # 노트 CRUD
     │   │   └── health/     # GET — Render cold-start 폴링
     │   ├── auth/callback/  # Supabase OAuth 콜백 처리
     │   ├── login/          # Google 로그인 페이지
-    │   ├── setup/          # 교재 단원 선택 페이지
-    │   ├── chat/           # 메인 채팅 페이지 (사이드바 + ChatPanel)
-    │   └── page.tsx        # 레벨 선택 (Home)
-    ├── components/         # ChatPanel, MessageList, InputBar
+    │   ├── chat/           # 메인 채팅 페이지 (사이드바 + PDF 뷰어 + ChatPanel)
+    │   └── page.tsx        # → /chat 리다이렉트
+    ├── components/         # ChatPanel, MessageList, PdfViewer, InputBar, PronunciationModal
     ├── hooks/
     │   ├── useChat.ts      # SSE 스트리밍, 메시지 큐
     │   ├── useBackendHealth.ts  # Render cold-start 감지
-    │   └── useTTS.ts       # Web Speech API (독일어 발음)
+    │   └── useTTS.ts       # Web Speech API (다국어 발음)
     ├── lib/
     │   ├── supabase/       # client.ts, server.ts (SSR)
-    │   └── types.ts        # Message, Unit 타입, UNITS 데이터
+    │   ├── types.ts        # Message, SavedSummary, SavedNote 타입
+    │   ├── pdfLibrary.ts   # PDF 업로드/목록 관리
+    │   ├── annotations.ts  # PDF 주석 CRUD
+    │   ├── summaries.ts    # 학습 요약 API
+    │   └── notes.ts        # 노트 API
     ├── middleware.ts        # Supabase 세션 검증 → 미인증 시 /login
     └── .env.example
 ```
@@ -274,6 +358,7 @@ lingua-rag/
 ```
 data: {"type": "token",     "content": "..."}   # 스트리밍 청크
 data: {"type": "truncated"}                       # max_tokens 도달
+data: {"type": "usage",     "output_tokens": N, "input_tokens": N, ...}
 data: {"type": "done",      "conversation_id": "...", "message_id": "..."}
 data: {"type": "error",     "message": "..."}
 data: [DONE]                                      # 스트림 종료
@@ -283,11 +368,12 @@ data: [DONE]                                      # 스트림 종료
 
 ### 사전 준비
 
-- Python 3.11+
+- Python 3.13+
 - Node.js 20+
 - PostgreSQL (로컬 또는 Render)
 - Anthropic API 키
-- Supabase 프로젝트 (Google OAuth 활성화)
+- OpenAI API 키 (RAG 임베딩)
+- Supabase 프로젝트 (Google OAuth + Storage 활성화)
 
 ### Backend
 
@@ -297,7 +383,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 cp .env.example .env
-# .env에서 ANTHROPIC_API_KEY, DATABASE_URL, SUPABASE_URL 입력
+# .env에서 ANTHROPIC_API_KEY, DATABASE_URL, SUPABASE_URL, OPENAI_API_KEY 입력
 
 # DB 스키마 초기화
 psql $DATABASE_URL -f schema.sql
@@ -324,36 +410,34 @@ npm run dev
 
 | 변수 | 필수 | 설명 |
 |------|------|------|
-| `ANTHROPIC_API_KEY` | ✅ | Anthropic API 키 |
-| `DATABASE_URL` | ✅ | PostgreSQL 연결 URL |
-| `SUPABASE_URL` | ✅ | Supabase 프로젝트 URL (JWKS JWT 검증용) |
-| `FRONTEND_URL` | ✅ | CORS 허용 오리진 (쉼표 구분) |
-| `OPENAI_API_KEY` | ✅ | OpenAI API 키 (RAG 쿼리 임베딩용) |
+| `ANTHROPIC_API_KEY` | O | Anthropic API 키 |
+| `DATABASE_URL` | O | PostgreSQL 연결 URL |
+| `SUPABASE_URL` | O | Supabase 프로젝트 URL (JWKS JWT 검증용) |
+| `SUPABASE_SERVICE_KEY` | O | Supabase service role 키 (Storage 접근) |
+| `FRONTEND_URL` | O | CORS 허용 오리진 (쉼표 구분) |
+| `OPENAI_API_KEY` | O | OpenAI API 키 (RAG 쿼리 임베딩용) |
 | `ENVIRONMENT` | - | `development` / `production` (기본값: `development`) |
 | `CLAUDE_MODEL` | - | 기본값: `claude-sonnet-4-6` |
-
-`FRONTEND_URL`에 Vercel 프리뷰 URL을 허용하려면:
-```
-FRONTEND_URL=https://my-app.vercel.app,https://*.vercel.app
-```
+| `RAG_ENABLED` | - | RAG 검색 활성화 (기본값: `true`) |
 
 ### Frontend (`frontend/.env.local`)
 
 | 변수 | 필수 | 설명 |
 |------|------|------|
-| `BACKEND_URL` | ✅ | FastAPI 백엔드 URL |
-| `NEXT_PUBLIC_SUPABASE_URL` | ✅ | Supabase 프로젝트 URL |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | ✅ | Supabase anon (public) API 키 |
+| `BACKEND_URL` | O | FastAPI 백엔드 URL |
+| `NEXT_PUBLIC_SUPABASE_URL` | O | Supabase 프로젝트 URL |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | O | Supabase anon (public) API 키 |
 
 ## 배포
 
-### Supabase (Auth)
+### Supabase (Auth + Storage)
 
 1. [supabase.com](https://supabase.com)에서 새 프로젝트 생성
-2. **Authentication → Providers → Google** 활성화
+2. **Authentication > Providers > Google** 활성화
    - Google Cloud Console에서 OAuth 클라이언트 ID/Secret 발급
    - Authorized redirect URI: `https://<project>.supabase.co/auth/v1/callback`
-3. **Project Settings → API**에서 `URL`과 `anon` 키 확인
+3. **Storage** — PDF 저장용 버킷 생성
+4. **Project Settings > API**에서 `URL`, `anon` 키, `service_role` 키 확인
 
 ### Render (Backend)
 
@@ -365,13 +449,10 @@ FRONTEND_URL=https://my-app.vercel.app,https://*.vercel.app
    - `ANTHROPIC_API_KEY` = Anthropic API 키
    - `OPENAI_API_KEY` = OpenAI API 키 (RAG 임베딩)
    - `SUPABASE_URL` = Supabase 프로젝트 URL
+   - `SUPABASE_SERVICE_KEY` = Supabase service role 키
    - `FRONTEND_URL` = Vercel 배포 URL
    - `ENVIRONMENT` = `production`
 5. PostgreSQL Shell에서 `schema.sql` 실행 (`vector` 익스텐션 포함)
-6. PDF 인덱싱 실행 (최초 1회):
-   ```bash
-   python scripts/index_pdf.py --textbook dokdokdok-a1 --pdf <PDF_PATH> --clear
-   ```
 
 ### Vercel (Frontend)
 
@@ -381,7 +462,7 @@ FRONTEND_URL=https://my-app.vercel.app,https://*.vercel.app
    - `BACKEND_URL` = Render 백엔드 URL
    - `NEXT_PUBLIC_SUPABASE_URL` = Supabase URL
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY` = Supabase anon 키
-4. Supabase **Authentication → URL Configuration**에서 추가:
+4. Supabase **Authentication > URL Configuration**에서 추가:
    - Site URL: `https://your-app.vercel.app`
    - Redirect URLs: `https://your-app.vercel.app/auth/callback`
 
@@ -394,24 +475,35 @@ FRONTEND_URL=https://my-app.vercel.app,https://*.vercel.app
 | `POST` | `/api/chat` | SSE 스트리밍 Q&A |
 | `GET` | `/api/conversations` | 현재 유저의 대화 목록 |
 | `GET` | `/api/conversations/{id}/messages` | 대화 메시지 조회 |
+| `GET/POST` | `/api/pdfs` | PDF 목록 조회 / 업로드 |
+| `GET/DELETE` | `/api/pdfs/{id}` | PDF 조회 / 삭제 |
+| `GET/POST/PUT/DELETE` | `/api/pdfs/{id}/annotations` | PDF 주석 CRUD |
+| `PATCH` | `/api/pdfs/{id}/language` | PDF 학습 언어 설정 |
+| `GET/PATCH` | `/api/pdfs/{id}/last-page` | 마지막 읽은 페이지 |
+| `GET/POST` | `/api/summaries` | 학습 요약 목록 / 저장 |
+| `DELETE` | `/api/summaries/{id}` | 학습 요약 삭제 |
+| `GET/POST` | `/api/notes` | 노트 목록 / 저장 |
+| `DELETE` | `/api/notes/{id}` | 노트 삭제 |
+| `PATCH` | `/api/messages/{id}/feedback` | 메시지 피드백 (up/down) |
+| `DELETE` | `/api/messages/{id}/truncate` | 메시지 이후 삭제 (재시도) |
 | `GET` | `/api/health` | 헬스 체크 (DB 연결 포함) |
 
 ## 설계 결정
 
-**인증**: Supabase Google OAuth + JWT Bearer. httponly 쿠키 기반 익명 세션에서 전환. JWT는 Next.js API Route에서만 백엔드에 전달 — 브라우저가 FastAPI를 직접 호출하지 않음.
+**인증**: Supabase Google OAuth + JWT Bearer. Next.js API Route에서만 백엔드에 JWT 전달 — 브라우저가 FastAPI를 직접 호출하지 않음.
 
-**JWT 검증**: FastAPI가 Supabase JWKS 엔드포인트(`/auth/v1/.well-known/jwks.json`)에서 공개키를 가져와 ES256으로 검증. `PyJWKClient`의 `lru_cache`로 JWKS 응답 캐싱.
+**JWT 검증**: FastAPI가 Supabase JWKS 엔드포인트에서 공개키를 가져와 ES256으로 검증. `PyJWKClient`의 `lru_cache`로 JWKS 응답 캐싱.
 
-**단원별 대화 격리**: `(user_id, unit_id)` 조합으로 대화를 분리. 단원 전환 시 새 대화 시작.
+**PDF별 대화 격리**: `(user_id, pdf_id)` 조합으로 대화를 분리. PDF 전환 시 해당 PDF의 대화 이력 로드.
 
-**동시성 제어**: 같은 유저의 중복 요청을 `asyncio.Lock` (LRU OrderedDict, 1,000 유저 캡)으로 직렬화. `--workers 1` 단일 프로세스 필수 (asyncio.Lock은 프로세스 간 공유 불가).
+**범용 언어 튜터**: 시스템 프롬프트가 `language` 파라미터를 받아 어떤 언어든 지원. PDF별로 학습 언어를 설정할 수 있으며, RAG 컨텍스트가 없으면 일반 지식으로 답변.
 
-**고아 메시지 정리**: 앱 시작 시 1시간 이상 된 사용자 메시지 중 어시스턴트 응답이 없는 것을 삭제. 미드스트림 크래시로 발생하는 불완전한 대화 이력 방지.
+**Prompt Caching**: 시스템 프롬프트를 고정 prefix (튜터 역할 + 답변 규칙)와 동적 suffix (RAG 결과)로 분리. 고정 부분에 `cache_control: ephemeral`을 적용해 Anthropic prompt caching 활용.
 
-**RAG 파이프라인**: 사용자 메시지를 `text-embedding-3-small`로 임베딩 → pgvector cosine 유사도 검색 (max_distance=0.7, top-3) → 매칭된 교재 원문을 Claude 시스템 프롬프트에 `## 교재 원문 참고`로 주입. 단원이 선택된 경우 해당 unit_id로 검색 범위를 제한. PDF 인덱싱은 `scripts/index_pdf.py`로 오프라인 실행 (독독독 A1: 186청크, 56단원).
+**동시성 제어**: 같은 유저의 중복 요청을 `asyncio.Lock` (LRU OrderedDict, 1,000 유저 캡)으로 직렬화.
+
+**RAG 파이프라인**: 사용자 메시지를 `text-embedding-3-small`로 임베딩 → pgvector cosine 유사도 검색 (max_distance=0.7, top-3) → 매칭된 교재 원문을 Claude 시스템 프롬프트에 주입. `pdf_id`로 검색 범위를 해당 PDF로 제한.
+
+**PDF 저장**: Supabase Storage에 저장. 메타데이터(이름, 크기, 페이지 수, 언어)는 PostgreSQL `pdf_files` 테이블에 관리.
 
 **Render cold-start**: `useBackendHealth` 훅이 `/api/health`를 폴링(3초 간격, 최대 20회). 서버 준비 중이면 채팅 화면 상단에 경고 배너 표시.
-
-**채팅 패널 지속성**: 단원 전환 시 기존 패널을 unmount하지 않고 `display: none`으로 숨김. 단원 재선택 시 대화 이력이 즉시 복원됨.
-
-**Next.js 프록시**: 브라우저에서 FastAPI 백엔드를 직접 호출하지 않고 `app/api/chat/route.ts`를 통해 프록시. Supabase access token을 서버 사이드에서 주입해 Bearer 헤더로 전달.

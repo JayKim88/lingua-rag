@@ -26,11 +26,14 @@ class Settings(BaseSettings):
     # Supabase Auth — JWKS endpoint for JWT verification (ES256)
     SUPABASE_URL: str
 
+    # Supabase Storage — service role key for server-side storage access
+    SUPABASE_SERVICE_ROLE_KEY: str = ""
+
     # OpenAI — Embeddings API for RAG (v0.2)
     OPENAI_API_KEY: str = ""
 
-    # RAG — set to True to enable vector search context injection
-    RAG_ENABLED: bool = False
+    # RAG — vector search context injection (always on for PDF-based learning)
+    RAG_ENABLED: bool = True
 
     # App
     ENVIRONMENT: str = "development"

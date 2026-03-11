@@ -2,9 +2,9 @@
 Notes router.
 
 Endpoints:
-  GET    /api/notes?unit_id=...   List notes for a unit
-  POST   /api/notes               Create a note
-  DELETE /api/notes/{id}          Delete a note
+  GET    /api/notes?pdf_id=...   List notes for a PDF
+  POST   /api/notes              Create a note
+  DELETE /api/notes/{id}         Delete a note
 """
 
 import logging
@@ -25,8 +25,8 @@ def _to_out(n: dict) -> NoteOut:
     saved_at = n["saved_at"]
     return NoteOut(
         id=n["id"],
-        unit_id=n["unit_id"],
-        unit_title=n["unit_title"],
+        pdf_id=n["pdf_id"],
+        pdf_name=n["pdf_name"],
         content=n["content"],
         saved_at=saved_at.isoformat() if hasattr(saved_at, "isoformat") else str(saved_at),
     )
@@ -34,11 +34,11 @@ def _to_out(n: dict) -> NoteOut:
 
 @router.get("/notes", response_model=NoteListResponse)
 async def list_notes(
-    unit_id: str = Query(..., max_length=50),
+    pdf_id: str = Query(..., max_length=255),
     user_id: UUID = Depends(get_current_user),
 ):
-    """List all notes for the authenticated user in a given unit."""
-    rows = await note_repo.list_by_user_unit(user_id, unit_id)
+    """List all notes for the authenticated user for a given PDF."""
+    rows = await note_repo.list_by_user_pdf(user_id, pdf_id)
     return {"notes": [_to_out(r) for r in rows]}
 
 

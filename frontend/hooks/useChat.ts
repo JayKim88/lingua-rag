@@ -4,21 +4,20 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { Message } from "@/lib/types";
 
 interface UseChatOptions {
-  unitId: string;
-  level: "A1" | "A2";
-  textbookId: string;
+  pdfId: string;
   getPageText?: () => Promise<string | null>;
 }
 
 const PAGE_TRIGGER = /이\s*페이지/;
 
-export function useChat({ unitId, level, textbookId, getPageText }: UseChatOptions) {
+export function useChat({ pdfId, getPageText }: UseChatOptions) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [queueSize, setQueueSize] = useState(0);
 
   const queue = useRef<string[]>([]);
+  const messagesRef = useRef<Message[]>([]);
   const streamingRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   // When true, the NEXT processMessage call marks the assistant response as isSummary
@@ -28,7 +27,10 @@ export function useChat({ unitId, level, textbookId, getPageText }: UseChatOptio
   // the assistant message, but stops updating the UI.
   const generationRef = useRef(0);
 
-  // On unit change: orphan any running stream (do NOT abort — let it drain so
+  // Keep messagesRef in sync so retryFromMessage can read current state synchronously
+  messagesRef.current = messages;
+
+  // On PDF change: orphan any running stream (do NOT abort — let it drain so
   // the backend can persist the assistant message), clear UI, load DB history.
   useEffect(() => {
     generationRef.current += 1;
@@ -50,9 +52,8 @@ export function useChat({ unitId, level, textbookId, getPageText }: UseChatOptio
         if (!convsRes.ok || cancelled) return;
 
         const { conversations } = await convsRes.json();
-        // list_by_session returns newest-first; find the latest for this unit
         const conv = (conversations ?? []).find(
-          (c: { unit_id: string }) => c.unit_id === unitId
+          (c: { pdf_id: string }) => c.pdf_id === pdfId
         );
         if (!conv || cancelled) return;
 
@@ -83,7 +84,7 @@ export function useChat({ unitId, level, textbookId, getPageText }: UseChatOptio
     return () => {
       cancelled = true;
     };
-  }, [unitId]);
+  }, [pdfId]);
 
   const processMessage = useCallback(
     async (content: string) => {
@@ -138,9 +139,7 @@ export function useChat({ unitId, level, textbookId, getPageText }: UseChatOptio
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             message: content,
-            unit_id: unitId,
-            level,
-            textbook_id: textbookId,
+            pdf_id: pdfId,
             ...(pageText ? { page_text: pageText } : {}),
           }),
           signal: controller.signal,
@@ -270,7 +269,7 @@ export function useChat({ unitId, level, textbookId, getPageText }: UseChatOptio
         }
       }
     },
-    [unitId, level, textbookId, getPageText]
+    [pdfId, getPageText]
   );
 
   const sendMessage = useCallback(
@@ -291,7 +290,7 @@ export function useChat({ unitId, level, textbookId, getPageText }: UseChatOptio
 이번 세션의 주요 학습 내용을 설명해주세요.
 
 ## 🔤 주요 어휘
-대화에서 등장한 독일어 단어와 표현을 정리해주세요.
+대화에서 등장한 단어와 표현을 정리해주세요.
 
 ## 📖 문법 포인트
 다룬 문법 사항을 간략히 정리해주세요.
@@ -323,5 +322,51 @@ export function useChat({ unitId, level, textbookId, getPageText }: UseChatOptio
     []
   );
 
-  return { messages, isStreaming, isLoadingHistory, queueSize, sendMessage, sendSummary, cancelMessage, updateFeedback };
+  /**
+   * Retry: remove the target message and everything after it (UI + DB), then re-send.
+   * - If target is an assistant message: also remove the preceding user message, re-send its content.
+   * - If target is a user message: remove it and everything after, re-send its content.
+   * Returns the content to resend (caller calls sendMessage).
+   *
+   * Uses messagesRef (not state) to read current messages synchronously —
+   * React's setMessages updater runs asynchronously so we cannot rely on it
+   * to return values.
+   */
+  const retryFromMessage = useCallback(
+    (messageId: string): string | null => {
+      const current = messagesRef.current;
+      const idx = current.findIndex(
+        (m) => m.id === messageId || m.backendId === messageId
+      );
+      if (idx === -1) return null;
+
+      const target = current[idx];
+      let contentToResend: string | null = null;
+      let truncateBackendId: string | null = null;
+
+      if (target.role === "assistant") {
+        const userIdx = idx - 1 >= 0 && current[idx - 1].role === "user" ? idx - 1 : -1;
+        if (userIdx === -1) return null;
+        contentToResend = current[userIdx].content;
+        truncateBackendId = current[userIdx].backendId ?? null;
+        setMessages(current.slice(0, userIdx));
+      } else {
+        contentToResend = target.content;
+        truncateBackendId = target.backendId ?? null;
+        setMessages(current.slice(0, idx));
+      }
+
+      // Fire-and-forget DB cleanup — does not block UI or re-send
+      if (truncateBackendId) {
+        fetch(`/api/messages/${truncateBackendId}/truncate`, { method: "DELETE" }).catch(
+          () => { /* non-critical: DB cleanup failure doesn't block UX */ }
+        );
+      }
+
+      return contentToResend;
+    },
+    [] // messagesRef is a ref, stable across renders
+  );
+
+  return { messages, isStreaming, isLoadingHistory, queueSize, sendMessage, sendSummary, cancelMessage, updateFeedback, retryFromMessage };
 }

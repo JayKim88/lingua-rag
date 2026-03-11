@@ -2,9 +2,9 @@
 Summaries router.
 
 Endpoints:
-  GET    /api/summaries?unit_id=...   List summaries for a unit
-  POST   /api/summaries               Create a summary
-  DELETE /api/summaries/{id}          Delete a summary
+  GET    /api/summaries?pdf_id=...   List summaries for a PDF
+  POST   /api/summaries              Create a summary
+  DELETE /api/summaries/{id}         Delete a summary
 """
 
 import logging
@@ -25,8 +25,8 @@ def _to_out(s: dict) -> SummaryOut:
     saved_at = s["saved_at"]
     return SummaryOut(
         id=s["id"],
-        unit_id=s["unit_id"],
-        unit_title=s["unit_title"],
+        pdf_id=s["pdf_id"],
+        pdf_name=s["pdf_name"],
         content=s["content"],
         saved_at=saved_at.isoformat() if hasattr(saved_at, "isoformat") else str(saved_at),
     )
@@ -34,11 +34,11 @@ def _to_out(s: dict) -> SummaryOut:
 
 @router.get("/summaries", response_model=SummaryListResponse)
 async def list_summaries(
-    unit_id: str = Query(..., max_length=50),
+    pdf_id: str = Query(..., max_length=255),
     user_id: UUID = Depends(get_current_user),
 ):
-    """List all summaries for the authenticated user in a given unit."""
-    rows = await summary_repo.list_by_user_unit(user_id, unit_id)
+    """List all summaries for the authenticated user for a given PDF."""
+    rows = await summary_repo.list_by_user_pdf(user_id, pdf_id)
     return {"summaries": [_to_out(r) for r in rows]}
 
 

@@ -111,5 +111,29 @@ export function useTTS() {
     [language, volume, rate]
   );
 
-  return { speak, volume, setVolume, rate, setRate, language, setLanguage, isSpeaking };
+  const speakWithOptions = useCallback(
+    (text: string, opts: { volume?: number; rate?: number }) => {
+      if (typeof window === "undefined" || !window.speechSynthesis) return;
+      if (!language) return;
+
+      window.speechSynthesis.cancel();
+
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = language;
+      utterance.volume = opts.volume ?? volume;
+      utterance.rate = opts.rate ?? rate;
+
+      const voice = voiceRef.current ?? pickBestVoice(language);
+      if (voice) utterance.voice = voice;
+
+      utterance.onstart = () => setIsSpeaking(true);
+      utterance.onend = () => setIsSpeaking(false);
+      utterance.onerror = () => setIsSpeaking(false);
+
+      window.speechSynthesis.speak(utterance);
+    },
+    [language, volume, rate]
+  );
+
+  return { speak, speakWithOptions, volume, setVolume, rate, setRate, language, setLanguage, isSpeaking };
 }
