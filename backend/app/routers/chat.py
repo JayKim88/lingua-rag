@@ -150,11 +150,17 @@ async def chat_endpoint(
             # Resolve language for the PDF (if available)
             # BCP-47 code → display name for system prompt
             _LANG_NAMES: dict[str, str] = {
-                "de-DE": "독일어", "de-AT": "독일어", "de-CH": "독일어",
-                "en-US": "영어", "en-GB": "영어",
-                "fr-FR": "프랑스어", "es-ES": "스페인어",
-                "it-IT": "이탈리아어", "pt-BR": "포르투갈어",
-                "ja-JP": "일본어", "zh-CN": "중국어",
+                "de-DE": "독일어",
+                "de-AT": "독일어",
+                "de-CH": "독일어",
+                "en-US": "영어",
+                "en-GB": "영어",
+                "fr-FR": "프랑스어",
+                "es-ES": "스페인어",
+                "it-IT": "이탈리아어",
+                "pt-BR": "포르투갈어",
+                "ja-JP": "일본어",
+                "zh-CN": "중국어",
                 "ko-KR": "한국어",
             }
             language = "English"  # default fallback

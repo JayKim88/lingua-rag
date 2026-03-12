@@ -8,18 +8,18 @@ Metadata is persisted in the pdf_files table (PostgreSQL via asyncpg).
 All write/delete operations require a valid JWT.
 """
 
+import base64
 import logging
 import uuid as uuid_mod
 from typing import Annotated
 from uuid import UUID
 
 import fitz  # PyMuPDF
-import base64
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, UploadFile
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
-from app.core.storage import object_path, storage_upload, storage_download, storage_signed_url, storage_delete
+from app.core.storage import object_path, storage_delete, storage_download, storage_signed_url, storage_upload
 from app.db.repositories import AnnotationRepository, PdfFileRepository
 from app.deps.auth import get_current_user
 from app.services.indexing_service import index_pdf
@@ -58,6 +58,7 @@ class LastPageUpdate(BaseModel):
 # ---------------------------------------------------------------------------
 # PDF endpoints
 # ---------------------------------------------------------------------------
+
 
 @router.post("/upload")
 async def upload_pdf(
@@ -103,7 +104,9 @@ async def upload_pdf(
         "total_pages": meta["total_pages"],
         "language": meta.get("language"),
         "index_status": meta.get("index_status", "pending"),
-        "created_at": meta["created_at"].timestamp() if hasattr(meta["created_at"], "timestamp") else meta["created_at"],
+        "created_at": (
+            meta["created_at"].timestamp() if hasattr(meta["created_at"], "timestamp") else meta["created_at"]
+        ),
     }
 
 
@@ -289,6 +292,7 @@ async def delete_pdf(
 # Annotation endpoints
 # ---------------------------------------------------------------------------
 
+
 @router.get("/{pdf_id}/annotations")
 async def list_annotations(
     pdf_id: str,
@@ -306,9 +310,7 @@ async def create_annotation(
     body: AnnotationCreate,
     user: Annotated[UUID, Depends(get_current_user)],
 ):
-    return await ann_repo.create(
-        user, pdf_id, body.page_num, body.x_pct, body.y_pct, body.text, body.color
-    )
+    return await ann_repo.create(user, pdf_id, body.page_num, body.x_pct, body.y_pct, body.text, body.color)
 
 
 @router.patch("/{pdf_id}/annotations/{ann_id}")
@@ -319,9 +321,12 @@ async def update_annotation(
     user: Annotated[UUID, Depends(get_current_user)],
 ):
     result = await ann_repo.update(
-        user, ann_id,
-        text=body.text, color=body.color,
-        x_pct=body.x_pct, y_pct=body.y_pct,
+        user,
+        ann_id,
+        text=body.text,
+        color=body.color,
+        x_pct=body.x_pct,
+        y_pct=body.y_pct,
     )
     if not result:
         raise HTTPException(404, "Annotation not found")

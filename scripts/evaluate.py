@@ -36,7 +36,7 @@ REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT / "backend"))
 
 from app.data.prompts import build_system_prompt  # noqa: E402
-import anthropic                                   # noqa: E402
+import anthropic  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -68,14 +68,14 @@ ALL_RULES = CONTENT_RULES + FORMAT_RULES
 RULE_LABELS = {
     # Content
     "answer_grounded_in_context": "컨텍스트 기반 답변",
-    "correct_target_language":    "올바른 학습 언어 사용",
-    "answer_completeness":        "답변 완결성",
-    "no_hallucination":           "허위 정보 없음",
-    "clear_explanation":          "명확한 설명",
+    "correct_target_language": "올바른 학습 언어 사용",
+    "answer_completeness": "답변 완결성",
+    "no_hallucination": "허위 정보 없음",
+    "clear_explanation": "명확한 설명",
     # Format
-    "format_bold":                "학습 언어 bold 처리",
-    "format_no_table":            "표 금지 준수",
-    "translation_inline":         "번역 즉시 배치",
+    "format_bold": "학습 언어 bold 처리",
+    "format_no_table": "표 금지 준수",
+    "translation_inline": "번역 즉시 배치",
 }
 
 JUDGE_PROMPT = """\
@@ -159,6 +159,7 @@ JUDGE_PROMPT = """\
 # Core functions
 # ---------------------------------------------------------------------------
 
+
 def load_questions(path: Path) -> list[dict]:
     with open(path, encoding="utf-8") as f:
         return json.load(f)
@@ -239,7 +240,10 @@ async def judge_response(
 # RAG metrics — keyword-based ground truth
 # ---------------------------------------------------------------------------
 
-def compute_rag_metrics(response: str, expected_keywords: list[str] | None) -> dict | None:
+
+def compute_rag_metrics(
+    response: str, expected_keywords: list[str] | None
+) -> dict | None:
     """
     Compute simple RAG recall metric based on expected keywords.
 
@@ -255,13 +259,16 @@ def compute_rag_metrics(response: str, expected_keywords: list[str] | None) -> d
     return {
         "expected": expected_keywords,
         "found": found,
-        "recall": round(len(found) / len(expected_keywords), 3) if expected_keywords else 0,
+        "recall": round(len(found) / len(expected_keywords), 3)
+        if expected_keywords
+        else 0,
     }
 
 
 # ---------------------------------------------------------------------------
 # Evaluate a single question
 # ---------------------------------------------------------------------------
+
 
 async def evaluate_question(
     client: anthropic.AsyncAnthropic,
@@ -328,6 +335,7 @@ async def evaluate_question(
 # Report computation
 # ---------------------------------------------------------------------------
 
+
 def compute_report(results: list[dict]) -> dict:
     rule_stats: dict[str, dict] = {
         r: {"pass": 0, "fail": 0, "na": 0, "error": 0} for r in ALL_RULES
@@ -362,30 +370,32 @@ def compute_report(results: list[dict]) -> dict:
     applicable = [r for r in ALL_RULES if rule_rates.get(r) is not None]
     overall = (
         round(sum(rule_rates[r] for r in applicable) / len(applicable), 1)
-        if applicable else None
+        if applicable
+        else None
     )
 
     # RAG recall aggregate
     rag_recalls = [
-        r["rag_metrics"]["recall"]
-        for r in results
-        if r["rag_metrics"] is not None
+        r["rag_metrics"]["recall"] for r in results if r["rag_metrics"] is not None
     ]
     avg_rag_recall = (
-        round(sum(rag_recalls) / len(rag_recalls) * 100, 1)
-        if rag_recalls else None
+        round(sum(rag_recalls) / len(rag_recalls) * 100, 1) if rag_recalls else None
     )
 
     # Content vs Format breakdown
     content_applicable = [r for r in CONTENT_RULES if rule_rates.get(r) is not None]
     content_score = (
-        round(sum(rule_rates[r] for r in content_applicable) / len(content_applicable), 1)
-        if content_applicable else None
+        round(
+            sum(rule_rates[r] for r in content_applicable) / len(content_applicable), 1
+        )
+        if content_applicable
+        else None
     )
     format_applicable = [r for r in FORMAT_RULES if rule_rates.get(r) is not None]
     format_score = (
         round(sum(rule_rates[r] for r in format_applicable) / len(format_applicable), 1)
-        if format_applicable else None
+        if format_applicable
+        else None
     )
 
     return {
@@ -451,22 +461,25 @@ def print_report(report: dict) -> None:
             pct = f"{m['recall'] * 100:.0f}%"
             missing = set(m["expected"]) - set(m["found"])
             miss_str = f"  누락: {', '.join(missing)}" if missing else ""
-            print(f"    {r['id']}: {pct} ({len(m['found'])}/{len(m['expected'])}){miss_str}")
+            print(
+                f"    {r['id']}: {pct} ({len(m['found'])}/{len(m['expected'])}){miss_str}"
+            )
 
     # Failure detail
     failures = [
-        r for r in report["results"]
-        if r["judgment"] and any(
-            v.get("pass") is False
-            for v in r["judgment"].get("rules", {}).values()
-        )
+        r
+        for r in report["results"]
+        if r["judgment"]
+        and any(v.get("pass") is False for v in r["judgment"].get("rules", {}).values())
     ]
     if failures:
         print()
         print("  실패 상세:")
         for r in failures:
             rules = r["judgment"]["rules"]
-            failed = [RULE_LABELS[k] for k, v in rules.items() if v.get("pass") is False]
+            failed = [
+                RULE_LABELS[k] for k, v in rules.items() if v.get("pass") is False
+            ]
             print(f"    {r['id']} ({r['language']}): {', '.join(failed)}")
             for k, v in rules.items():
                 if v.get("pass") is False:
@@ -487,6 +500,7 @@ def _print_rule_row(rule: str, report: dict) -> None:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
 
 async def main() -> None:
     parser = argparse.ArgumentParser(
@@ -550,10 +564,7 @@ async def main() -> None:
         async with semaphore:
             return await evaluate_question(client, q, idx, len(questions))
 
-    tasks = [
-        evaluate_with_limit(q, i)
-        for i, q in enumerate(questions, 1)
-    ]
+    tasks = [evaluate_with_limit(q, i) for i, q in enumerate(questions, 1)]
     results = await asyncio.gather(*tasks)
 
     report = compute_report(list(results))

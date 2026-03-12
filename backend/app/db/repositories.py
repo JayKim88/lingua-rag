@@ -78,9 +78,7 @@ class ConversationRepository:
         """Fetch conversation by ID."""
         pool = get_pool()
         async with pool.acquire() as conn:
-            record = await conn.fetchrow(
-                "SELECT * FROM conversations WHERE id = $1", conversation_id
-            )
+            record = await conn.fetchrow("SELECT * FROM conversations WHERE id = $1", conversation_id)
         return _record_to_dict(record) if record else None
 
     async def list_by_user(self, user_id: UUID) -> list[dict[str, Any]]:
@@ -182,9 +180,7 @@ class MessageRepository:
             )
         return [_record_to_dict(r) for r in records]
 
-    async def delete_from(
-        self, user_id: UUID, message_id: UUID
-    ) -> int:
+    async def delete_from(self, user_id: UUID, message_id: UUID) -> int:
         """Delete message with given ID and all subsequent messages in the same conversation.
 
         Verifies ownership via the parent conversation's user_id.
@@ -211,9 +207,7 @@ class MessageRepository:
         deleted = int(result.split()[-1]) if result else 0
         return deleted
 
-    async def update_feedback(
-        self, user_id: UUID, message_id: UUID, feedback: str | None
-    ) -> bool:
+    async def update_feedback(self, user_id: UUID, message_id: UUID, feedback: str | None) -> bool:
         """Set or clear feedback ('up'/'down'/None) on an assistant message.
 
         Verifies ownership via the parent conversation's user_id.
@@ -344,7 +338,9 @@ class AnnotationRepository:
                 WHERE user_id = $1 AND pdf_id = $2 AND page_num = $3
                 ORDER BY created_at ASC
                 """,
-                user_id, pdf_id, page_num,
+                user_id,
+                pdf_id,
+                page_num,
             )
         return [_record_to_dict(r) for r in records]
 
@@ -357,12 +353,14 @@ class AnnotationRepository:
                 WHERE user_id = $1 AND pdf_id = $2
                 ORDER BY page_num ASC, created_at ASC
                 """,
-                user_id, pdf_id,
+                user_id,
+                pdf_id,
             )
         return [_record_to_dict(r) for r in records]
 
-    async def create(self, user_id: UUID, pdf_id: str, page_num: int,
-                     x_pct: float, y_pct: float, text: str, color: str) -> dict:
+    async def create(
+        self, user_id: UUID, pdf_id: str, page_num: int, x_pct: float, y_pct: float, text: str, color: str
+    ) -> dict:
         pool = get_pool()
         async with pool.acquire() as conn:
             record = await conn.fetchrow(
@@ -372,7 +370,13 @@ class AnnotationRepository:
                 VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, NOW())
                 RETURNING *
                 """,
-                user_id, pdf_id, page_num, x_pct, y_pct, text, color,
+                user_id,
+                pdf_id,
+                page_num,
+                x_pct,
+                y_pct,
+                text,
+                color,
             )
         return _record_to_dict(record)
 
@@ -389,13 +393,21 @@ class AnnotationRepository:
         params: list = []
         idx = 1
         if text is not None:
-            sets.append(f"text = ${idx}"); params.append(text); idx += 1
+            sets.append(f"text = ${idx}")
+            params.append(text)
+            idx += 1
         if color is not None:
-            sets.append(f"color = ${idx}"); params.append(color); idx += 1
+            sets.append(f"color = ${idx}")
+            params.append(color)
+            idx += 1
         if x_pct is not None:
-            sets.append(f"x_pct = ${idx}"); params.append(x_pct); idx += 1
+            sets.append(f"x_pct = ${idx}")
+            params.append(x_pct)
+            idx += 1
         if y_pct is not None:
-            sets.append(f"y_pct = ${idx}"); params.append(y_pct); idx += 1
+            sets.append(f"y_pct = ${idx}")
+            params.append(y_pct)
+            idx += 1
         if not sets:
             return None
         params.extend([ann_id, user_id])
@@ -412,7 +424,8 @@ class AnnotationRepository:
         async with pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM pdf_annotations WHERE id = $1 AND user_id = $2",
-                ann_id, user_id,
+                ann_id,
+                user_id,
             )
         return result != "DELETE 0"
 
@@ -446,7 +459,11 @@ class PdfFileRepository:
                 VALUES ($1, $2, $3, $4, $5, NOW())
                 RETURNING *
                 """,
-                pdf_id, user_id, name, size, total_pages,
+                pdf_id,
+                user_id,
+                name,
+                size,
+                total_pages,
             )
         return _record_to_dict(record)
 
@@ -464,7 +481,8 @@ class PdfFileRepository:
         async with pool.acquire() as conn:
             record = await conn.fetchrow(
                 "SELECT * FROM pdf_files WHERE id = $1 AND user_id = $2",
-                pdf_id, user_id,
+                pdf_id,
+                user_id,
             )
         return _record_to_dict(record) if record else None
 
@@ -473,7 +491,9 @@ class PdfFileRepository:
         async with pool.acquire() as conn:
             result = await conn.execute(
                 "UPDATE pdf_files SET language = $1 WHERE id = $2 AND user_id = $3",
-                language, pdf_id, user_id,
+                language,
+                pdf_id,
+                user_id,
             )
         return result != "UPDATE 0"
 
@@ -482,7 +502,9 @@ class PdfFileRepository:
         async with pool.acquire() as conn:
             result = await conn.execute(
                 "UPDATE pdf_files SET last_page = $1 WHERE id = $2 AND user_id = $3",
-                last_page, pdf_id, user_id,
+                last_page,
+                pdf_id,
+                user_id,
             )
         return result != "UPDATE 0"
 
@@ -491,7 +513,8 @@ class PdfFileRepository:
         async with pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM pdf_files WHERE id = $1 AND user_id = $2",
-                pdf_id, user_id,
+                pdf_id,
+                user_id,
             )
         return result != "DELETE 0"
 
@@ -531,7 +554,12 @@ class VectorSearchRepository:
             """
             async with pool.acquire() as conn:
                 records = await conn.fetch(
-                    query, embedding_str, pdf_id, max_distance, limit, exclude_page,
+                    query,
+                    embedding_str,
+                    pdf_id,
+                    max_distance,
+                    limit,
+                    exclude_page,
                 )
         else:
             async with pool.acquire() as conn:

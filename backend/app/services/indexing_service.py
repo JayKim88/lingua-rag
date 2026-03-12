@@ -80,7 +80,9 @@ async def index_pdf(user_id: UUID, pdf_id: str) -> None:
         async with pool.acquire() as conn:
             await conn.execute(
                 "UPDATE pdf_files SET index_status = $1 WHERE id = $2 AND user_id = $3",
-                status, pdf_id, user_id,
+                status,
+                pdf_id,
+                user_id,
             )
 
     await _set_status("indexing")
@@ -118,9 +120,7 @@ async def index_pdf(user_id: UUID, pdf_id: str) -> None:
 
         # 5. Delete old chunks for this PDF, then insert new ones
         async with pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM document_chunks WHERE pdf_id = $1", pdf_id
-            )
+            await conn.execute("DELETE FROM document_chunks WHERE pdf_id = $1", pdf_id)
 
             for idx, (chunk, embedding) in enumerate(zip(all_chunks, all_embeddings)):
                 embedding_str = f"[{','.join(map(str, embedding))}]"

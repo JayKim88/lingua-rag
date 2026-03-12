@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.db.connection import close_db_pool, get_pool, init_db_pool
-from app.routers import chat, conversations, health, messages, notes, pdfs, summaries
+from app.routers import chat, conversations, guest, health, messages, notes, pdfs, summaries
 
 logging.basicConfig(
     level=logging.INFO,
@@ -77,16 +77,12 @@ app = FastAPI(
 #   regex and pass it via allow_origin_regex instead.
 # ---------------------------------------------------------------------------
 _explicit_origins = [o for o in settings.allowed_origins if "*" not in o]
-_has_vercel_wildcard = any(
-    "vercel.app" in o and "*" in o for o in settings.allowed_origins
-)
+_has_vercel_wildcard = any("vercel.app" in o and "*" in o for o in settings.allowed_origins)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_explicit_origins,
-    allow_origin_regex=(
-        r"https://[a-zA-Z0-9-]+\.vercel\.app" if _has_vercel_wildcard else None
-    ),
+    allow_origin_regex=(r"https://[a-zA-Z0-9-]+\.vercel\.app" if _has_vercel_wildcard else None),
     allow_credentials=True,  # Required for httponly session cookies
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Accept", "Authorization"],
@@ -103,3 +99,4 @@ app.include_router(summaries.router, prefix="/api", tags=["Summaries"])
 app.include_router(notes.router, prefix="/api", tags=["Notes"])
 app.include_router(messages.router, prefix="/api", tags=["Messages"])
 app.include_router(pdfs.router, prefix="/api", tags=["PDFs"])
+app.include_router(guest.router, prefix="/api", tags=["Guest"])

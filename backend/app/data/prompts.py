@@ -11,10 +11,10 @@ Prompt caching structure:
 
 from typing import Optional
 
-
 # ---------------------------------------------------------------------------
 # Fixed tutor role declaration (language-parametric)
 # ---------------------------------------------------------------------------
+
 
 def _build_tutor_role(language: str, learner_language: str = "한국어") -> str:
     return (
@@ -56,6 +56,7 @@ B: **학습 대상 언어 대답** → 모국어 번역
 # Main builder (returns two parts for prompt caching)
 # ---------------------------------------------------------------------------
 
+
 def build_system_prompt_parts(
     language: str,
     learner_language: str = "한국어",
@@ -80,14 +81,16 @@ def build_system_prompt_parts(
         (fixed_prefix, dynamic_suffix)
     """
     # --- Cacheable prefix ---
-    fixed_prefix = "\n".join([
-        _build_tutor_role(language, learner_language),
-        ANSWER_FORMAT,
-        "## 제약 조건\n",
-        "- 교재 컨텍스트가 제공되면 교재 내용을 기반으로 답변하세요.",
-        "- 교재 컨텍스트가 없으면 일반 지식으로 답변하되, 교재에 없는 내용임을 명시하세요.",
-        "- 학습자를 절대 지적하거나 부정적으로 평가하지 마세요.",
-    ])
+    fixed_prefix = "\n".join(
+        [
+            _build_tutor_role(language, learner_language),
+            ANSWER_FORMAT,
+            "## 제약 조건\n",
+            "- 교재 컨텍스트가 제공되면 교재 내용을 기반으로 답변하세요.",
+            "- 교재 컨텍스트가 없으면 일반 지식으로 답변하되, 교재에 없는 내용임을 명시하세요.",
+            "- 학습자를 절대 지적하거나 부정적으로 평가하지 마세요.",
+        ]
+    )
 
     # --- Dynamic suffix ---
     dynamic_parts: list[str] = []

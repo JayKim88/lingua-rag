@@ -1,0 +1,12 @@
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = [
+  "E702",  # multiple statements on one line (semicolon) — used in compact builder patterns
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]

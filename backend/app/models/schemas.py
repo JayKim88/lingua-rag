@@ -36,11 +36,15 @@ class ChatRequest(BaseModel):
         description="Current page number (1-indexed). Used to exclude current page from RAG when Vision is active.",
     )
 
-    model_config = {"json_schema_extra": {"example": {
-        "message": "이 페이지의 문법을 설명해주세요",
-        "pdf_id": "abc-123",
-        "force_new_conversation": False,
-    }}}
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "message": "이 페이지의 문법을 설명해주세요",
+                "pdf_id": "abc-123",
+                "force_new_conversation": False,
+            }
+        }
+    }
 
 
 class MessageOut(BaseModel):

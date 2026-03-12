@@ -127,9 +127,10 @@
   - 12개 다국어 테스트셋 (독/영/일/중/프/스), RAG 포함 4개
   - `--language` 필터, `--concurrency` 병렬 평가 지원
 
-- [ ] **CI/CD 파이프라인**
-  - GitHub Actions: build + lint + deploy
-  - Eval CI: 범용 테스트셋으로 품질 회귀 감지
+- [x] **CI/CD 파이프라인** — 2026-03-12
+  - `ci.yml`: PR/push → backend lint (ruff) + test (pytest) + frontend lint + typecheck + build
+  - `eval.yml`: `workflow_dispatch` 수동 트리거 → LLM-as-Judge 평가 + artifact 업로드
+  - ruff config (`pyproject.toml`): line-length 120, E/F/W/I rules
 
 ---
 

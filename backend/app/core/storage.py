@@ -6,16 +6,20 @@ Auth:            service_role key (bypasses RLS)
 """
 
 import httpx
+
 from app.core.config import settings
 
 BUCKET = "pdfs"
 
+
 def _base() -> str:
     return f"{settings.SUPABASE_URL.rstrip('/')}/storage/v1"
+
 
 def _headers() -> dict[str, str]:
     key = settings.SUPABASE_SERVICE_ROLE_KEY
     return {"Authorization": f"Bearer {key}", "apikey": key}
+
 
 def object_path(user_id: str, pdf_id: str) -> str:
     return f"{user_id}/{pdf_id}.pdf"

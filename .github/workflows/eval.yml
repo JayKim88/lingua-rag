@@ -1,0 +1,48 @@
+name: Eval (LLM-as-Judge)
+
+on:
+  workflow_dispatch:
+    inputs:
+      language:
+        description: "Filter by language (e.g. 독일어). Leave empty for all."
+        required: false
+        default: ""
+      concurrency:
+        description: "Max concurrent evaluations"
+        required: false
+        default: "2"
+
+jobs:
+  evaluate:
+    name: Run LLM-as-Judge Evaluation
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run evaluation
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          ARGS="--output ../scripts/results --concurrency ${{ github.event.inputs.concurrency }}"
+          if [ -n "${{ github.event.inputs.language }}" ]; then
+            ARGS="$ARGS --language '${{ github.event.inputs.language }}'"
+          fi
+          python ../scripts/evaluate.py $ARGS
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-results-${{ github.run_id }}
+          path: scripts/results/
+          retention-days: 90
