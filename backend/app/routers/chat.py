@@ -128,29 +128,42 @@ async def chat_endpoint(
             )
 
             # RAG: embed user message → search similar chunks from the user's PDF
+            # When Vision is active (page_image), exclude that page from RAG to avoid duplication.
             rag_chunks: list[str] = []
             if settings.RAG_ENABLED and pdf_id:
                 try:
                     embedding_svc = get_embedding_service()
                     query_vec = await embedding_svc.embed(body.message)
+                    exclude_page = body.page_number if body.page_image else None
                     results = await vector_repo.search(
                         query_embedding=query_vec,
                         pdf_id=pdf_id,
                         limit=3,
+                        exclude_page=exclude_page,
                     )
                     rag_chunks.extend(r["content"] for r in results)
                     if rag_chunks:
-                        logger.info("RAG: %d chunks for pdf %s", len(results), pdf_id)
+                        logger.info("RAG: %d chunks for pdf %s (exclude_page=%s)", len(results), pdf_id, exclude_page)
                 except Exception as exc:
                     logger.warning("RAG search failed, using base prompt: %s", exc)
 
             # Resolve language for the PDF (if available)
-            language = "독일어"  # default fallback
+            # BCP-47 code → display name for system prompt
+            _LANG_NAMES: dict[str, str] = {
+                "de-DE": "독일어", "de-AT": "독일어", "de-CH": "독일어",
+                "en-US": "영어", "en-GB": "영어",
+                "fr-FR": "프랑스어", "es-ES": "스페인어",
+                "it-IT": "이탈리아어", "pt-BR": "포르투갈어",
+                "ja-JP": "일본어", "zh-CN": "중국어",
+                "ko-KR": "한국어",
+            }
+            language = "English"  # default fallback
             if pdf_id:
                 pdf_repo = PdfFileRepository()
                 pdf_meta = await pdf_repo.get(user_id, pdf_id)
                 if pdf_meta and pdf_meta.get("language"):
-                    language = pdf_meta["language"]
+                    raw_lang = pdf_meta["language"]
+                    language = _LANG_NAMES.get(raw_lang, raw_lang)
 
             # 5. Stream from Claude
             try:

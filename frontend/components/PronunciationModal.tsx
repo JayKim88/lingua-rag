@@ -64,11 +64,11 @@ function expandSymbols(s: string, lang: string): string {
   return result;
 }
 
-function normalize(s: string, lang = "de-DE"): string[] {
+function normalize(s: string, lang = "en-US"): string[] {
   return expandSymbols(s, lang)
     .toLowerCase()
     // Keep digits as tokens alongside letters
-    .replace(/[^a-zA-ZÀ-ÖØ-öø-ÿ\u3040-\u30FF\u4E00-\u9FFF0-9\s]/g, "")
+    .replace(/[^a-zA-ZÀ-ÖØ-öø-ÿ\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF0-9\s]/g, "")
     .split(/\s+/)
     .filter(Boolean);
 }
@@ -81,6 +81,9 @@ const NUMBER_WORDS: Record<string, Record<string, number>> = {
   "es-ES": { cero: 0, uno: 1, una: 1, dos: 2, tres: 3, cuatro: 4, cinco: 5, seis: 6, siete: 7, ocho: 8, nueve: 9, diez: 10, once: 11, doce: 12, trece: 13, catorce: 14, quince: 15, veinte: 20, treinta: 30, cuarenta: 40, cincuenta: 50, sesenta: 60, setenta: 70, ochenta: 80, noventa: 90, cien: 100 },
   "it-IT": { zero: 0, uno: 1, una: 1, due: 2, tre: 3, quattro: 4, cinque: 5, sei: 6, sette: 7, otto: 8, nove: 9, dieci: 10, undici: 11, dodici: 12, tredici: 13, quattordici: 14, quindici: 15, venti: 20, trenta: 30, quaranta: 40, cinquanta: 50, sessanta: 60, settanta: 70, ottanta: 80, novanta: 90, cento: 100 },
   "pt-BR": { zero: 0, um: 1, uma: 1, dois: 2, duas: 2, três: 3, quatro: 4, cinco: 5, seis: 6, sete: 7, oito: 8, nove: 9, dez: 10, onze: 11, doze: 12, treze: 13, catorze: 14, quinze: 15, vinte: 20, trinta: 30, quarenta: 40, cinquenta: 50, sessenta: 60, setenta: 70, oitenta: 80, noventa: 90, cem: 100 },
+  "ja-JP": { ゼロ: 0, れい: 0, いち: 1, に: 2, さん: 3, し: 4, よん: 4, ご: 5, ろく: 6, なな: 7, しち: 7, はち: 8, きゅう: 9, く: 9, じゅう: 10, にじゅう: 20, さんじゅう: 30, よんじゅう: 40, ごじゅう: 50, ろくじゅう: 60, ななじゅう: 70, はちじゅう: 80, きゅうじゅう: 90, ひゃく: 100 },
+  "zh-CN": { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10, 二十: 20, 三十: 30, 四十: 40, 五十: 50, 六十: 60, 七十: 70, 八十: 80, 九十: 90, 百: 100 },
+  "ko-KR": { 영: 0, 공: 0, 일: 1, 하나: 1, 이: 2, 둘: 2, 삼: 3, 셋: 3, 사: 4, 넷: 4, 오: 5, 다섯: 5, 육: 6, 여섯: 6, 칠: 7, 일곱: 7, 팔: 8, 여덟: 8, 구: 9, 아홉: 9, 십: 10, 이십: 20, 삼십: 30, 사십: 40, 오십: 50, 육십: 60, 칠십: 70, 팔십: 80, 구십: 90, 백: 100 },
 };
 NUMBER_WORDS["en-GB"] = NUMBER_WORDS["en-US"];
 NUMBER_WORDS["de-AT"] = NUMBER_WORDS["de-DE"];
@@ -109,7 +112,7 @@ function fuzzyMatch(a: string, b: string): boolean {
 // ---------------------------------------------------------------------------
 // PronunciationModal
 // ---------------------------------------------------------------------------
-export default function PronunciationModal({ text, speak, onClose, lang = "de-DE" }: Props) {
+export default function PronunciationModal({ text, speak, onClose, lang = "en-US" }: Props) {
   const origWords = useMemo(() => normalize(text, lang), [text, lang]);
 
   const [phase, setPhase] = useState<Phase>("listening");

@@ -505,30 +505,49 @@ class VectorSearchRepository:
         pdf_id: str,
         limit: int = 3,
         max_distance: float = 0.7,
+        exclude_page: int | None = None,
     ) -> list[dict[str, Any]]:
         """
         Return document chunks most similar to query_embedding for a given PDF.
 
         Uses cosine distance (<=>). Lower distance = more similar.
         Chunks with distance >= max_distance are excluded.
+        If exclude_page is set, chunks from that page are skipped (avoids
+        duplicating Vision context).
         """
         pool = get_pool()
         embedding_str = f"[{','.join(map(str, query_embedding))}]"
 
-        async with pool.acquire() as conn:
-            records = await conn.fetch(
-                """
-                SELECT content, metadata,
+        if exclude_page is not None:
+            query = """
+                SELECT content, metadata, page_number,
                        embedding <=> $1::vector AS distance
                 FROM document_chunks
                 WHERE pdf_id = $2
                   AND embedding <=> $1::vector < $3
+                  AND (page_number IS NULL OR page_number != $5)
                 ORDER BY distance
                 LIMIT $4
-                """,
-                embedding_str,
-                pdf_id,
-                max_distance,
-                limit,
-            )
+            """
+            async with pool.acquire() as conn:
+                records = await conn.fetch(
+                    query, embedding_str, pdf_id, max_distance, limit, exclude_page,
+                )
+        else:
+            async with pool.acquire() as conn:
+                records = await conn.fetch(
+                    """
+                    SELECT content, metadata, page_number,
+                           embedding <=> $1::vector AS distance
+                    FROM document_chunks
+                    WHERE pdf_id = $2
+                      AND embedding <=> $1::vector < $3
+                    ORDER BY distance
+                    LIMIT $4
+                    """,
+                    embedding_str,
+                    pdf_id,
+                    max_distance,
+                    limit,
+                )
         return [_record_to_dict(r) for r in records]

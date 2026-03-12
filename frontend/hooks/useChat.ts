@@ -6,11 +6,12 @@ import { Message } from "@/lib/types";
 interface UseChatOptions {
   pdfId: string;
   getPageText?: () => Promise<string | null>;
+  getPageNumber?: () => number | null;
 }
 
 const PAGE_TRIGGER = /이\s*페이지/;
 
-export function useChat({ pdfId, getPageText }: UseChatOptions) {
+export function useChat({ pdfId, getPageText, getPageNumber }: UseChatOptions) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
@@ -141,6 +142,7 @@ export function useChat({ pdfId, getPageText }: UseChatOptions) {
             message: content,
             pdf_id: pdfId,
             ...(pageText ? { page_text: pageText } : {}),
+            ...(pageText && getPageNumber ? { page_number: getPageNumber() } : {}),
           }),
           signal: controller.signal,
         });
@@ -269,7 +271,7 @@ export function useChat({ pdfId, getPageText }: UseChatOptions) {
         }
       }
     },
-    [pdfId, getPageText]
+    [pdfId, getPageText, getPageNumber]
   );
 
   const sendMessage = useCallback(

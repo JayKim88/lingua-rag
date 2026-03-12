@@ -23,6 +23,7 @@ interface ChatPanelProps {
   pdfName: string;
   injectText?: { text: string; id: number };
   getPageText?: () => Promise<string | null>;
+  getPageNumber?: () => number | null;
   hasPdfContext?: boolean;
   speak: (text: string) => void;
   onSaveToPage?: (content: string) => void;
@@ -33,12 +34,13 @@ export default function ChatPanel({
   pdfName,
   injectText,
   getPageText,
+  getPageNumber,
   hasPdfContext,
   speak,
   onSaveToPage,
 }: ChatPanelProps) {
   const { messages, isStreaming, isLoadingHistory, queueSize, sendMessage, sendSummary, cancelMessage, updateFeedback, retryFromMessage } =
-    useChat({ pdfId, getPageText });
+    useChat({ pdfId, getPageText, getPageNumber });
 
   // Local inject triggered by "use in input" action button on a message
   const [localInject, setLocalInject] = useState<

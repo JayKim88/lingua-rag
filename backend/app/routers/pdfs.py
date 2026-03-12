@@ -15,13 +15,14 @@ from uuid import UUID
 
 import fitz  # PyMuPDF
 import base64
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, UploadFile
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from app.core.storage import object_path, storage_upload, storage_download, storage_signed_url, storage_delete
 from app.db.repositories import AnnotationRepository, PdfFileRepository
 from app.deps.auth import get_current_user
+from app.services.indexing_service import index_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,7 @@ class LastPageUpdate(BaseModel):
 @router.post("/upload")
 async def upload_pdf(
     file: UploadFile,
+    background_tasks: BackgroundTasks,
     user: Annotated[UUID, Depends(get_current_user)],
 ):
     content_type = file.content_type or ""
@@ -91,12 +93,16 @@ async def upload_pdf(
     # Save metadata to DB
     meta = await pdf_repo.create(user, pdf_id, file.filename or "document.pdf", len(content), total_pages)
 
+    # Auto-trigger RAG indexing in background
+    background_tasks.add_task(index_pdf, user, pdf_id)
+
     return {
         "id": meta["id"],
         "name": meta["name"],
         "size": meta["size"],
         "total_pages": meta["total_pages"],
         "language": meta.get("language"),
+        "index_status": meta.get("index_status", "pending"),
         "created_at": meta["created_at"].timestamp() if hasattr(meta["created_at"], "timestamp") else meta["created_at"],
     }
 
@@ -111,10 +117,26 @@ async def list_pdfs(user: Annotated[UUID, Depends(get_current_user)]):
             "size": m["size"],
             "total_pages": m["total_pages"],
             "language": m.get("language"),
+            "index_status": m.get("index_status", "pending"),
             "created_at": m["created_at"].timestamp() if hasattr(m["created_at"], "timestamp") else m["created_at"],
         }
         for m in metas
     ]
+
+
+@router.post("/{pdf_id}/index")
+async def trigger_index(
+    pdf_id: str,
+    background_tasks: BackgroundTasks,
+    user: Annotated[UUID, Depends(get_current_user)],
+):
+    """Manually trigger or re-trigger RAG indexing for a PDF."""
+    meta = await pdf_repo.get(user, pdf_id)
+    if not meta:
+        raise HTTPException(404, "PDF not found")
+
+    background_tasks.add_task(index_pdf, user, pdf_id)
+    return {"index_status": "indexing"}
 
 
 @router.get("/{pdf_id}/language")

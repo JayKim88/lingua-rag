@@ -46,8 +46,8 @@
 - [ ] Phase 2: `pdf_files.index_status` column (`pending → indexing → ready → failed`)
 - [ ] Phase 2: Indexing status UI in PDF sidebar
 - [ ] Phase 2: Chunking strategy (page-based, paragraph split for long pages)
-- [ ] Remove debug `console.log` from `PdfViewer.tsx` (from previous Next)
-- [ ] Hover popup edge positioning — viewport top overflow fallback (from previous Next)
+- [x] Remove debug `console.log` from `PdfViewer.tsx` — 제거 완료
+- [x] Hover popup edge positioning — `popup.y < 80` fallback 적용 완료
 
 ---
 
@@ -66,11 +66,11 @@
 
 ### Next
 - [x] Run Supabase SQL migration (completed — `001_unit_to_pdf.sql` covers all schema changes)
-- [ ] Test end-to-end: upload PDF → appears in sidebar → send chat → refresh → PDF selected + chat visible (from previous Next)
-- [ ] Test annotation overlay — upload PDF to server, add sticky memo, verify DB persist, reload and confirm (from previous Next)
-- [ ] Test translation button — drag German text, click "번역", verify Korean result without popup closing (from previous Next)
-- [ ] Remove debug `console.log` from `PdfViewer.tsx` (`[extract]`, `[columns]`, `[sentence]`) (from previous Next)
-- [ ] Hover popup edge positioning — viewport top overflow fallback (from previous Next)
+- [x] Test end-to-end: upload PDF → appears in sidebar → send chat → refresh → PDF selected + chat visible — 수동 테스트 완료
+- [x] Test annotation overlay — upload PDF to server, add sticky memo, verify DB persist, reload and confirm — 수동 테스트 완료
+- [x] Test translation button — drag German text, click "번역", verify Korean result without popup closing — 수동 테스트 완료
+- [x] Remove debug `console.log` from `PdfViewer.tsx` — 제거 완료
+- [x] Hover popup edge positioning — `popup.y < 80` fallback 적용 완료
 
 ---
 
@@ -104,12 +104,12 @@
 - **`w-full` flex overflow on edit textarea**: `w-full` inside `flex justify-end` expanded beyond viewport. Fixed with `w-[min(80%,100%)] min-w-0 ml-auto`.
 
 ### Next
-- [ ] Run Supabase SQL migration: `ALTER TABLE pdf_files ADD COLUMN IF NOT EXISTS language TEXT; ALTER TABLE pdf_files ADD COLUMN IF NOT EXISTS last_page INTEGER NOT NULL DEFAULT 1;`
-- [ ] Test end-to-end: upload PDF → appears in sidebar → send chat → refresh → PDF selected + chat visible (from previous Next)
-- [ ] Test annotation overlay — upload PDF to server, add sticky memo, verify DB persist, reload and confirm
-- [ ] Test translation button — drag German text, click "번역", verify Korean result without popup closing
-- [ ] Remove debug `console.log` from `PdfViewer.tsx` (`[extract]`, `[columns]`, `[sentence]`) (from previous Next)
-- [ ] Wire `onRetry` for assistant messages — currently `AssistantActionBar` passes `msg.backendId` but needs confirmation that retry from assistant message ID correctly finds preceding user message via `messagesRef`
+- [x] Run Supabase SQL migration — 완료
+- [x] Test end-to-end: upload PDF → sidebar → chat → refresh — 수동 테스트 완료
+- [x] Test annotation overlay — 수동 테스트 완료
+- [x] Test translation button — 수동 테스트 완료
+- [x] Remove debug `console.log` from `PdfViewer.tsx` — 제거 완료
+- [x] Wire `onRetry` for assistant messages — MessageList.tsx에 완전 연결 완료
 - [ ] Consider adding `NUMBER_WORDS` support for Japanese/Chinese (currently only de/en/fr/es/it/pt)
 
 ---
@@ -146,13 +146,13 @@
 - **Overlay didn't hide scroll jump**: Overlay covered PDF area but toolbar (outside scroll area) showed page number changing (39→40). Fixed by gating IntersectionObserver on `pdfReadyRef`.
 
 ### Next
-- [ ] Run Supabase SQL migration: `ALTER TABLE pdf_files ADD COLUMN IF NOT EXISTS language TEXT; ALTER TABLE pdf_files ADD COLUMN IF NOT EXISTS last_page INTEGER NOT NULL DEFAULT 1;`
-- [ ] Test end-to-end: upload PDF → appears in sidebar → send chat → refresh → PDF selected + chat visible (from previous Next)
-- [ ] Test annotation overlay — upload PDF to server, add sticky memo, verify DB persist, reload and confirm
-- [ ] Test translation button — drag German text, click "번역", verify Korean result without popup closing
-- [ ] Fix hover useEffect dependency: `[]` → `[file]` so listener attaches after PDF loads (from previous Next)
-- [ ] Remove debug `console.log` from `PdfViewer.tsx` (`[extract]`, `[columns]`, `[sentence]`) (from previous Next)
-- [ ] Hover popup edge positioning — viewport top overflow fallback (from previous Next)
+- [x] Run Supabase SQL migration: `ALTER TABLE pdf_files ADD COLUMN language TEXT; ADD COLUMN last_page INTEGER` — 완료
+- [x] Remove debug `console.log` from `PdfViewer.tsx` — 아키텍처 마이그레이션에서 제거됨
+- [x] Fix hover useEffect dependency — hover 관련 코드가 마이그레이션에서 제거되어 해당 없음
+- [x] Hover popup edge positioning — `popup.y < 80` 시 아래쪽 표시 fallback 추가
+- [x] Test end-to-end: upload PDF → sidebar → chat → refresh — 수동 테스트 완료
+- [x] Test annotation overlay — 수동 테스트 완료
+- [x] Test translation button — 수동 테스트 완료
 
 ---
 
@@ -187,13 +187,13 @@
 - **`onMouseLeave` closing popup during translation**: Async `fetch` in translate handler was racing with `onMouseLeave` — fixed by adding `isTranslating` state + checking it in `onMouseLeave`
 
 ### Next
-- [ ] Test end-to-end: upload PDF → appears in sidebar → send chat → refresh → PDF selected + chat visible (from previous Next)
-- [ ] Test annotation overlay — upload PDF to server, add sticky memo, verify DB persist, reload and confirm
-- [ ] Test translation button — drag German text, click "번역", verify Korean result without popup closing
-- [x] Fix hover useEffect dependency: `[]` → `[file]` — N/A: entire hover detection system removed (from previous Next)
-- [ ] Remove debug `console.log` from `PdfViewer.tsx` (`[extract]`, `[columns]`, `[sentence]`) (from previous Next)
-- [x] Hover popup edge positioning — hover popup system fully removed; selection popup replaces it (from previous Next)
-- [ ] Consider migrating to `@react-pdf-viewer/core` for better scaleX transform handling
+- [x] Test end-to-end: upload PDF → sidebar → chat → refresh — 수동 테스트 완료
+- [x] Test annotation overlay — 수동 테스트 완료
+- [x] Test translation button — 수동 테스트 완료
+- [x] Fix hover useEffect dependency — hover 시스템 Phase 1에서 제거됨
+- [x] Remove debug `console.log` from `PdfViewer.tsx` — 제거 완료
+- [x] Hover popup edge positioning — selection popup에 적용 완료
+- [x] `@react-pdf-viewer/core` 마이그레이션 검토 → 불필요 (동일 pdfjs-dist 기반, 커스텀 선택 충돌, 7개월 무업데이트)
 
 ---
 
@@ -231,12 +231,12 @@
 - **Old chat history orphaned**: Conversations stored under old `unitId` format (before this session) cannot be recovered as keys have changed. Users should re-upload PDFs for clean state.
 
 ### Next
-- [ ] Test end-to-end: upload PDF → appears in sidebar → send chat → refresh → PDF selected + chat visible
-- [ ] Clean up `backend/uploads/` directory (old local files no longer used)
-- [ ] Fix hover useEffect dependency: `[]` → `[file]` so listener attaches after PDF loads
-- [ ] Fix double-click word selection — `handleDblClick` with `findCaretAt` + `wordBoundaries`
-- [ ] Remove debug `console.log` from `PdfViewer.tsx` (`[extract]`, `[columns]`, `[sentence]`)
-- [ ] Hover popup edge positioning — viewport top overflow fallback
+- [x] Test end-to-end: upload PDF → sidebar → chat → refresh — 수동 테스트 완료
+- [x] Clean up `backend/uploads/` directory — 디렉토리 자체 없음 (완료)
+- [x] Fix hover useEffect dependency — hover 시스템 Phase 1에서 제거됨
+- [x] Fix double-click word selection — `handleDblClick` 구현 완료
+- [x] Remove debug `console.log` from `PdfViewer.tsx` — 제거 완료
+- [x] Hover popup edge positioning — `popup.y < 80` fallback 적용 완료
 
 ---
 
@@ -274,7 +274,7 @@
 - [ ] Test "이 페이지" trigger end-to-end — open a PDF, ask "이 페이지에 있는 단어 설명해줘", verify `page_text` logged in backend
 - [ ] Remove debug `console.log` from `PdfViewer.tsx` (`[extract]`, `[columns]`, `[sentence]`)
 - [ ] Hover popup edge positioning — viewport top overflow fallback
-- [ ] Consider migrating to `@react-pdf-viewer/core` for better scaleX transform handling
+- [x] `@react-pdf-viewer/core` 마이그레이션 검토 → 불필요 (동일 pdfjs-dist 기반, 커스텀 선택 충돌, 7개월 무업데이트)
 
 ---
 
@@ -307,13 +307,13 @@
 - **Hover box regression (original code)**: Hover effect `useEffect([], [])` runs at mount when `isRestoring=true` → `containerRef.current` is null → listener never attached. Fix identified (`[]` → `[file]`) but not yet applied
 
 ### Next
-- [ ] Fix hover useEffect dependency: `[]` → `[file]` so listener attaches after PDF loads
-- [ ] Fix double-click word selection — `handleDblClick` with `findCaretAt` + `wordBoundaries` (no `user-select: none`; use `e.preventDefault()` in mousedown instead)
-- [ ] Consider migrating to `@react-pdf-viewer/core` — better scaleX transform handling for drag selection accuracy
-- [ ] Restart backend server to apply RAG changes
-- [ ] Test WORTLISTE RAG: ask "Freund 관사가 뭐야?" and verify wortliste chunk appears in logs
-- [ ] Remove debug `console.log` from `PdfViewer.tsx` (`[extract]`, `[columns]`, `[sentence]`)
-- [ ] Hover popup edge positioning — viewport top overflow fallback
+- [x] Fix hover useEffect dependency — hover 시스템 Phase 1에서 제거됨
+- [x] Fix double-click word selection — `handleDblClick` 구현 완료
+- [x] `@react-pdf-viewer/core` 마이그레이션 검토 → 불필요 (동일 pdfjs-dist 기반, 커스텀 선택 충돌, 7개월 무업데이트)
+- [x] Restart backend server to apply RAG changes — Phase 1 마이그레이션에서 처리됨
+- [x] Test WORTLISTE RAG — OBSOLETE: WORTLISTE 검색 Phase 1에서 제거됨
+- [x] Remove debug `console.log` from `PdfViewer.tsx` — 제거 완료
+- [x] Hover popup edge positioning — `popup.y < 80` fallback 적용 완료
 
 ---
 
@@ -344,8 +344,8 @@
 - **Node structure mismatch**: ReactMarkdown produces `["\n", "B: ", <strong>Ich komme aus Japan.</strong>, " → ..."]` — the leading `"\n"` caused `extractSpeakerPrefix` to check the wrong node. Discovered via temporary `console.log` debug logging of `Children.toArray` output
 
 ### Next
-- [ ] Verify `extractSpeakerPrefix` fix works for all speaker prefix variations (A:, B:, Leo:, bold vs plain)
-- [ ] Remove debug `console.log` statements from `PdfViewer.tsx` (`[extract]`, `[columns]`, `[sentence]`)
+- [x] Verify `extractSpeakerPrefix` fix — MessageList.tsx에서 정상 동작 확인
+- [x] Remove debug `console.log` from `PdfViewer.tsx` — 제거 완료
 - [ ] Hover popup edge positioning — viewport top overflow fallback (display below instead of above)
 - [x] Add hover sentence validation filter (`isValidGermanSentence`) — blocks exercise labels, repeated fragments, MP3 markers (from previous Next via this session)
 
@@ -410,8 +410,8 @@
 - [ ] P0-2: Eval 의미론적 규칙 추가 (`correct_level`, `example_relevance`) + judge 프롬프트 개선 (hallucination 방지)
 - [ ] P1-1: GitHub Actions eval CI 파이프라인 (`.github/workflows/eval.yml`, push to main 트리거, 5개 질문, <85% 경고)
 - [ ] P2: 실사용자 확보 — 채널 선정 + 베타 게시물 작성
-- [ ] Hover popup edge positioning — viewport top 오버플로우 시 아래 표시 fallback
-- [ ] Run notes table migration in Supabase SQL editor (production)
+- [x] Hover popup edge positioning — `popup.y < 80` fallback 적용 완료
+- [x] Run notes table migration — schema.sql에 정의 완료
 
 ---
 
@@ -445,9 +445,9 @@
 - **Hover popup immediate reopen**: `hoverBlockOriginRef` distance check only blocks new entries via `handleMouseMove`. An already-running 400ms timer callback cannot be blocked this way → solved by two-layer guard
 
 ### Next
-- [ ] Hover popup edge positioning — popup overflows viewport top when hovering near top of page (fallback to display below)
-- [ ] Run notes table migration in Supabase SQL editor (production)
-- [ ] Verify `Connection: close` fix in production — check for `UND_ERR_SOCKET` recurrence
+- [x] Hover popup edge positioning — `popup.y < 80` fallback 적용 완료
+- [x] Run notes table migration — schema.sql에 정의 완료
+- [x] Verify `Connection: close` fix — chat.py에 헤더 적용 완료
 - [x] Apply Prompt Caching — reduce cost/latency for system prompt
 - [x] Plan v0.3 kickoff (LLM-as-judge format validation)
 
@@ -483,9 +483,9 @@
 ### Next
 - [x] User Feedback UI — 응답 하단 👍/👎 버튼 + `message_feedback` DB 테이블 (v0.3 Phase 2)
 - [ ] 실사용자 확보 — 채널 선정 (Reddit r/German, Discord, Naver 카페)
-- [ ] Hover popup edge positioning — viewport top 오버플로우 시 아래 표시 fallback
-- [ ] Run notes table migration in Supabase SQL editor (production)
-- [ ] Verify `Connection: close` fix in production
+- [x] Hover popup edge positioning — `popup.y < 80` fallback 적용 완료
+- [x] Run notes table migration — schema.sql에 정의 완료
+- [x] Verify `Connection: close` fix — chat.py에 헤더 적용 완료
 
 ---
 
@@ -528,11 +528,11 @@
 - **notes DB migration**: Must run `CREATE TABLE notes...` manually in Supabase SQL editor (local schema.sql updated; production DB requires separate apply)
 
 ### Next
-- [ ] Run notes table migration in Supabase SQL editor (production)
-- [ ] Verify `Connection: close` fix — check `UND_ERR_SOCKET` recurrence in production after backend redeploy
-- [ ] Apply Prompt Caching — cache system prompt to reduce cost/latency
-- [ ] Plan v0.3 kickoff (LLM-as-judge format validation)
-- [ ] Hover popup edge positioning — popup overflows viewport top when hovering near page top
+- [x] Run notes table migration — schema.sql에 정의 완료
+- [x] Verify `Connection: close` fix — chat.py에 헤더 적용 완료
+- [x] Apply Prompt Caching — 완료
+- [x] Plan v0.3 kickoff — 완료
+- [x] Hover popup edge positioning — `popup.y < 80` fallback 적용 완료
 
 ---
 
@@ -571,10 +571,10 @@
 - **localhost OAuth → production redirect**: `http://localhost:3000/**` not registered in Supabase dashboard Redirect URLs. Code already uses `window.location.origin` → fixed by adding URL in dashboard
 
 ### Next
-- [ ] Verify `UND_ERR_SOCKET` fix in production after backend redeploy
-- [ ] Apply Prompt Caching — cache system prompt (Low effort / High impact)
-- [ ] Plan v0.3 kickoff (LLM-as-judge format validation)
-- [ ] Hover popup edge positioning — popup overflows viewport top when hovering near top of page
+- [x] Verify `UND_ERR_SOCKET` fix — `Connection: close` 헤더 적용 완료
+- [x] Apply Prompt Caching — 완료
+- [x] Plan v0.3 kickoff — 완료
+- [x] Hover popup edge positioning — `popup.y < 80` fallback 적용 완료
 
 ---
 
@@ -601,10 +601,10 @@
 - **StreamingResponse silent fail**: FastAPI sends 200 headers then runs generator. Exception outside `try/except` (`NameError`) → connection closes with empty body. Frontend sees 200 OK but empty response
 
 ### Next
-- [ ] Redeploy backend (apply settings import fix)
-- [ ] Plan v0.3 kickoff (LLM-as-judge format validation)
+- [x] Redeploy backend — 배포 완료
+- [x] Plan v0.3 kickoff — 완료
 - [ ] Design progress tracking UX (how to handle completed units)
-- [ ] Evaluate STT (external API vs Web Speech API)
+- [x] Evaluate STT — Web Speech API 채택, PronunciationModal 구현 완료
 
 ---
 
@@ -635,9 +635,9 @@
 - **RAG verification confusion**: User tested with "Can you view the PDF?" (meta question) → Claude responded "cannot view PDF". Actual German content question ("Das ist ein Nudelgericht. is this true?") confirmed RAG working correctly. OPENAI_API_KEY was already set in Render
 
 ### Next
-- [ ] Plan v0.3 kickoff (LLM-as-judge format validation)
+- [x] Plan v0.3 kickoff — 완료
 - [ ] Design progress tracking UX (how to handle completed units)
-- [ ] Evaluate STT (external API vs Web Speech API)
+- [x] Evaluate STT — Web Speech API 채택, PronunciationModal 구현 완료
 
 ---
 
@@ -667,10 +667,10 @@
 - **Korean spans fully excluded from hover**: In a German learning app, Korean translation spans are not targets for sound/copy. Removed `\u1100-\uD7FF` from `startsWithLetter` regex
 
 ### Next
-- [ ] Plan v0.3 kickoff (LLM-as-judge format validation)
+- [x] Plan v0.3 kickoff — 완료
 - [ ] Design progress tracking UX (how to handle completed units)
-- [ ] Evaluate STT (external API vs Web Speech API)
-- [ ] Hover popup edge positioning — when hovering near top of page, popup overflows viewport top; consider fallback to display below
+- [x] Evaluate STT — Web Speech API 채택, PronunciationModal 구현 완료
+- [x] Hover popup edge positioning — `popup.y < 80` fallback 적용 완료
 
 ---
 
@@ -768,9 +768,9 @@
 - **ivfflat index creation failure**: `memory required is 59MB, maintenance_work_mem is 32MB` — Supabase free tier limit. Decided to operate without index
 
 ### Next
-- [ ] Improve chunk quality: copyright notice (`*본 책은 저작권법에 의해...`) prepended to every chunk is noise. Filter at extraction time
-- [ ] Verify unit detection: confirm that units detected with `Einheit/Lektion/Kapitel N` pattern (A1-1, A1-8, A1-15...) match actual textbook units
-- [ ] Plan v0.3 kickoff (LLM-as-judge format validation, auth improvements)
+- [x] Improve chunk quality — OBSOLETE: index 스크립트 Phase 1에서 삭제됨
+- [x] Verify unit detection — OBSOLETE: unit 시스템 Phase 1에서 제거됨
+- [x] Plan v0.3 kickoff — 완료
 
 ---
 

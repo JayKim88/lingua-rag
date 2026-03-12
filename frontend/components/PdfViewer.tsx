@@ -411,6 +411,7 @@ function PdfViewerInner(
           return null;
         }
       },
+      getPageNumber: () => pageNumber,
       hasFile: () => !!file,
       getPdfId: () => serverId,
     }),
@@ -2232,7 +2233,7 @@ function PdfViewerInner(
                   setIsTranslating(true);
                   try {
                     const res = await fetch(
-                      `https://api.mymemory.translated.net/get?q=${encodeURIComponent(popup.text)}&langpair=de|ko`,
+                      `https://api.mymemory.translated.net/get?q=${encodeURIComponent(popup.text)}&langpair=${(language || "en-US").slice(0, 2)}|ko`,
                     );
                     const data = await res.json();
                     setPopupTranslation(
@@ -2246,7 +2247,7 @@ function PdfViewerInner(
                 }}
                 disabled={isTranslating}
                 className={`px-3 py-2 text-xs font-medium transition-all flex items-center gap-1.5 ${popupTranslation !== null ? "bg-green-50 text-green-700" : "text-green-700 hover:bg-green-50 active:bg-green-100 active:scale-95"} disabled:opacity-60`}
-                title="독일어 → 한국어 번역"
+                title="번역 (→ 한국어)"
               >
                 <svg
                   className="w-3.5 h-3.5"
@@ -2405,7 +2406,7 @@ function PdfViewerInner(
             key={practicePdfText}
             text={practicePdfText}
             speak={speak}
-            lang={language ?? "de-DE"}
+            lang={language ?? "en-US"}
             onClose={() => setPracticePdfText(null)}
           />
         )}

@@ -141,7 +141,7 @@ function ChatContent() {
     // Async: fetch server PDF list and merge with localStorage
     fetch("/api/pdfs")
       .then((r) => (r.ok ? r.json() : []))
-      .then((serverPdfs: Array<{ id: string; name: string; size: number; created_at: number }>) => {
+      .then((serverPdfs: Array<{ id: string; name: string; size: number; created_at: number; index_status?: string }>) => {
         if (!serverPdfs.length) return;
         const local = getLibraryMeta();
         const localByName = new Map(local.map((m) => [m.name, m]));
@@ -162,6 +162,7 @@ function ChatContent() {
               lastOpened: new Date(sp.created_at * 1000).toISOString(),
               addedAt: sp.created_at * 1000,
               serverId: sp.id,
+              indexStatus: (sp.index_status as PdfMeta["indexStatus"]) ?? "pending",
             });
             changed = true;
           }
@@ -175,6 +176,15 @@ function ChatContent() {
         if (changed) {
           setPdfLibrary(getLibraryMeta().sort((a, b) => a.addedAt - b.addedAt));
         }
+
+        // Update indexStatus for all existing PDFs from server
+        const statusMap = new Map(serverPdfs.map((sp) => [sp.name, sp.index_status ?? "pending"]));
+        setPdfLibrary((prev) =>
+          prev.map((m) => {
+            const serverStatus = statusMap.get(m.name);
+            return serverStatus ? { ...m, indexStatus: serverStatus as PdfMeta["indexStatus"] } : m;
+          }),
+        );
       })
       .catch(() => {});
   }, []);
@@ -186,6 +196,30 @@ function ChatContent() {
     const t = setTimeout(() => setPdfLibrary(getLibraryMeta().sort((a, b) => a.addedAt - b.addedAt)), 300);
     return () => clearTimeout(t);
   }, [openFile, initialized]);
+
+  // Poll index_status for PDFs that are pending/indexing
+  useEffect(() => {
+    const needsPoll = pdfLibrary.some(
+      (m) => m.serverId && (m.indexStatus === "pending" || m.indexStatus === "indexing"),
+    );
+    if (!needsPoll) return;
+
+    const timer = setInterval(async () => {
+      try {
+        const res = await fetch("/api/pdfs");
+        if (!res.ok) return;
+        const serverPdfs: Array<{ id: string; name: string; index_status?: string }> = await res.json();
+        const statusMap = new Map(serverPdfs.map((sp) => [sp.name, sp.index_status ?? "pending"]));
+        setPdfLibrary((prev) =>
+          prev.map((m) => {
+            const s = statusMap.get(m.name);
+            return s ? { ...m, indexStatus: s as PdfMeta["indexStatus"] } : m;
+          }),
+        );
+      } catch { /* ignore */ }
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [pdfLibrary]);
 
   // Fetch user info
   useEffect(() => {
@@ -615,9 +649,19 @@ function ChatContent() {
                           activePdfName === meta.name ? "text-gray-900 font-medium" : "text-gray-500 group-hover:text-gray-800"
                         }`}
                       >
-                        <svg className="w-3 h-3 text-red-400 shrink-0" fill="currentColor" viewBox="0 0 24 24">
-                          <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zm-1 1.5L18.5 9H13V3.5z" />
-                        </svg>
+                        {meta.indexStatus === "indexing" || meta.indexStatus === "pending" ? (
+                          <span className="w-3 h-3 shrink-0 flex items-center justify-center" title="인덱싱 중...">
+                            <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                          </span>
+                        ) : meta.indexStatus === "failed" ? (
+                          <span className="w-3 h-3 shrink-0 flex items-center justify-center" title="인덱싱 실패 — 클릭하여 재시도">
+                            <span className="w-2 h-2 rounded-full bg-red-400" />
+                          </span>
+                        ) : (
+                          <svg className="w-3 h-3 text-red-400 shrink-0" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zm-1 1.5L18.5 9H13V3.5z" />
+                          </svg>
+                        )}
                         <span className="truncate">{meta.name}</span>
                       </button>
                       <button
@@ -783,6 +827,7 @@ function ChatContent() {
                       pdfName={pdfName}
                       injectText={injectText}
                       getPageText={async () => pdfViewerRef.current?.getPageText() ?? null}
+                      getPageNumber={() => pdfViewerRef.current?.getPageNumber() ?? null}
                       hasPdfContext={hasPdfContext}
                       speak={speak}
                       onSaveToPage={handleOpenSaveToPage}
@@ -855,8 +900,19 @@ function ChatContent() {
                 onClick={() => {
                   if (typeof window === "undefined" || !window.speechSynthesis) return;
                   window.speechSynthesis.cancel();
-                  const utt = new SpeechSynthesisUtterance("Guten Morgen! Wie geht es Ihnen?");
-                  utt.lang = "de-DE";
+                  const sampleTexts: Record<string, string> = {
+                    "de-DE": "Guten Morgen! Wie geht es Ihnen?",
+                    "en-US": "Good morning! How are you?",
+                    "en-GB": "Good morning! How are you?",
+                    "fr-FR": "Bonjour ! Comment allez-vous ?",
+                    "es-ES": "¡Buenos días! ¿Cómo está usted?",
+                    "it-IT": "Buongiorno! Come sta?",
+                    "ja-JP": "おはようございます！お元気ですか？",
+                    "zh-CN": "早上好！你好吗？",
+                  };
+                  const lang = language || "en-US";
+                  const utt = new SpeechSynthesisUtterance(sampleTexts[lang] || sampleTexts["en-US"]);
+                  utt.lang = lang;
                   utt.volume = draftVolume;
                   utt.rate = draftRate;
                   window.speechSynthesis.speak(utt);
@@ -1061,7 +1117,7 @@ function ChatContent() {
                   if (e.key === "Enter") handleCreateFolder();
                   if (e.key === "Escape") setShowNewFolderModal(false);
                 }}
-                placeholder="예: 독독독 A1 노트"
+                placeholder="예: 학습 노트"
                 autoFocus
                 className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2.5 outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent"
               />

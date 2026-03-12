@@ -31,6 +31,10 @@ class ChatRequest(BaseModel):
         default=None,
         description="Extracted text from the current PDF page for context.",
     )
+    page_number: Optional[int] = Field(
+        default=None,
+        description="Current page number (1-indexed). Used to exclude current page from RAG when Vision is active.",
+    )
 
     model_config = {"json_schema_extra": {"example": {
         "message": "이 페이지의 문법을 설명해주세요",

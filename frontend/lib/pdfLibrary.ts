@@ -8,7 +8,8 @@ export const LIBRARY_META_KEY = "lingua-pdf-library";
 export const LIBRARY_CURRENT_KEY = "lingua-pdf-current";
 export const LIBRARY_MAX = 10;
 
-export interface PdfMeta { name: string; size: number; lastOpened: string; addedAt: number; serverId?: string }
+export type IndexStatus = "pending" | "indexing" | "ready" | "failed";
+export interface PdfMeta { name: string; size: number; lastOpened: string; addedAt: number; serverId?: string; indexStatus?: IndexStatus }
 
 // ---------------------------------------------------------------------------
 // IndexedDB helpers

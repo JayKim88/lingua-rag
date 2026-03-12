@@ -67,32 +67,25 @@
 > 목표: 유저가 PDF를 업로드하면 자동으로 RAG 인덱싱 완료.
 > 이것이 범용 서비스의 핵심 기능.
 
-- [ ] **POST /api/pdfs/{id}/index 엔드포인트**
-  - 트리거: PDF 업로드 직후 (또는 수동 호출)
-  - 플로우:
-    1. Supabase Storage에서 PDF 다운로드
-    2. PyMuPDF로 텍스트 추출 (페이지별)
-    3. 청킹 (페이지 기반, 또는 문단 기반)
-    4. OpenAI embedding batch 호출
-    5. `document_chunks` 저장 (pdf_id, page_number, content, embedding)
-  - 비동기 처리: FastAPI `BackgroundTasks`
-  - 인덱싱 상태: `pdf_files` 테이블에 `index_status` 컬럼 추가
-    - `pending` → `indexing` → `ready` → `failed`
+- [x] **POST /api/pdfs/{id}/index 엔드포인트**
+  - 트리거: PDF 업로드 직후 BackgroundTasks 자동 + 수동 POST
+  - 플로우: Supabase Storage → PyMuPDF 텍스트 추출 → 페이지 기반 청킹 → OpenAI batch embedding → document_chunks 저장
+  - 인덱싱 상태: `pdf_files.index_status` (`pending → indexing → ready → failed`)
 
-- [ ] **인덱싱 상태 UI**
-  - PDF 목록에서 인덱싱 상태 표시
-  - `ready` 전까지 "AI 질문" 비활성화 또는 경고
+- [x] **인덱싱 상태 UI**
+  - 사이드바 PDF 목록에 상태 인디케이터 (amber pulse=인덱싱, red=실패, PDF 아이콘=ready)
+  - 3초 폴링으로 pending/indexing 상태 자동 갱신
 
-- [ ] **RAG 검색 로직 수정**
-  - `chat.py`: `pdf_id`로 해당 PDF의 chunks만 검색
-  - Vision + RAG 병행 전략:
-    - `page_image` 있으면 → RAG는 다른 페이지에서만 검색 (중복 방지)
-    - `page_image` 없으면 → RAG 전체 검색
+- [x] **RAG 검색 로직 수정**
+  - `chat.py`: Vision 활성 시 현재 페이지 RAG 제외 (`exclude_page`)
+  - `page_number` 프론트→백엔드 전달 파이프라인 구축
 
-- [ ] **청킹 전략**
-  - 기본: 페이지 기반 (1페이지 = 1청크, 간단하고 메타데이터 매핑 쉬움)
-  - 긴 페이지: 문단 분할 (token 수 기준)
-  - 메타데이터: `{ page_number, pdf_id }`
+- [x] **청킹 전략**
+  - 기본: 페이지 기반 (1페이지 = 1청크)
+  - 긴 페이지 (>3000자): 문단 분할
+  - 메타데이터: `{ page_number }`
+
+- [ ] **DB 마이그레이션 실행** — `002_index_status.sql` Supabase SQL 에디터에서 실행 필요
 
 ---
 
