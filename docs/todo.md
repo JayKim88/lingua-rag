@@ -143,9 +143,15 @@
   - `indexing_service.py`: 인덱싱 시 `tsv` 컬럼 자동 생성
   - graceful fallback: `tsv` 미존재 시 vector-only 검색
   - DB 마이그레이션: `004_hybrid_search.sql`
-- [ ] Observability (비용 대시보드, LangSmith 연동)
+- [x] **Observability** — 2026-03-12
+  - `GET /api/stats`: 토큰 사용량, RAG 히트율, 비용 추정 (Claude + OpenAI 임베딩)
+  - 일별 사용량 (14일), PDF별 breakdown (top 10)
 - [ ] 임베딩 모델 비교 (multilingual-e5-large vs text-embedding-3-small)
-- [ ] 다국어 TTS 자동 감지 (PDF 언어 → TTS 언어 자동 설정)
+- [x] **다국어 TTS 자동 감지** — 2026-03-12
+  - PDF 인덱싱 시 텍스트 기반 언어 자동 감지 (`language_detect.py`)
+  - Unicode 스크립트 분석 (CJK) + 기능어 빈도 매칭 (Latin script 6개 언어)
+  - 감지된 언어 → `pdf_files.language`에 자동 저장
+  - 프론트엔드: PDF 열 때 서버에서 language 로드 → TTS 자동 설정 (기존 흐름 활용)
 
 ---
 

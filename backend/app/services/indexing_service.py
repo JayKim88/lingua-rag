@@ -15,6 +15,7 @@ import fitz  # PyMuPDF
 from app.core.storage import object_path, storage_download
 from app.db.connection import get_pool
 from app.services.embedding_service import get_embedding_service
+from app.services.language_detect import detect_language
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,26 @@ async def index_pdf(user_id: UUID, pdf_id: str) -> None:
             logger.warning("Indexing %s: no extractable text", pdf_id)
             await _set_status("ready")  # empty but not failed
             return
+
+        # 2b. Auto-detect language (only if not already set by user)
+        async with pool.acquire() as conn:
+            current_lang = await conn.fetchval(
+                "SELECT language FROM pdf_files WHERE id = $1 AND user_id = $2",
+                pdf_id,
+                user_id,
+            )
+        if not current_lang:
+            sample_text = " ".join(text for _, text in pages[:5])
+            detected = detect_language(sample_text)
+            if detected:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE pdf_files SET language = $1 WHERE id = $2 AND user_id = $3",
+                        detected,
+                        pdf_id,
+                        user_id,
+                    )
+                logger.info("Indexing %s: auto-detected language %s", pdf_id, detected)
 
         # 3. Chunk pages
         all_chunks: list[dict] = []
