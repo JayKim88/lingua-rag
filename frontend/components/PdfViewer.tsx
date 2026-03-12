@@ -2128,11 +2128,10 @@ function PdfViewerInner(
             id="pdf-selection-popup"
             className="fixed z-50 bg-white border border-gray-200 rounded-xl shadow-md overflow-hidden flex flex-col-reverse"
             style={{
-              left: popup.x,
-              bottom:
-                typeof window !== "undefined"
-                  ? window.innerHeight - popup.y + 16
-                  : 0,
+              left: Math.min(popup.x, (typeof window !== "undefined" ? window.innerWidth : 800) - 160),
+              ...(popup.y < 80
+                ? { top: popup.y + 24 }
+                : { bottom: typeof window !== "undefined" ? window.innerHeight - popup.y + 16 : 0 }),
               transform: "translateX(-50%)",
             }}
           >
