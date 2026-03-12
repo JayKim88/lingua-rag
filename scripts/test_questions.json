@@ -1,32 +1,106 @@
 [
   {
-    "id": "q01",
-    "language": "German",
+    "id": "de-01",
+    "language": "독일어",
     "question": "sein 동사 현재형을 모든 인칭으로 정리해서 알려주세요.",
-    "focus": "answer_completeness + clear_explanation"
+    "focus": "answer_completeness + format_bold",
+    "context": null,
+    "expected_in_response": ["bin", "bist", "ist", "sind", "seid"]
   },
   {
-    "id": "q02",
-    "language": "German",
-    "question": "독일어로 출신 국가를 말하는 방법을 알려주세요. 한국, 독일, 일본, 미국 예시를 보여주세요.",
-    "focus": "correct_target_language + no_hallucination"
-  },
-  {
-    "id": "q03",
-    "language": "German",
-    "question": "독일어 숫자 1부터 20까지 알려주세요.",
-    "focus": "answer_completeness"
-  },
-  {
-    "id": "q04",
-    "language": "German",
+    "id": "de-02",
+    "language": "독일어",
     "question": "분리동사 aufstehen이 문장에서 어떻게 쓰이는지 알려주세요.",
-    "focus": "correct_target_language + clear_explanation"
+    "focus": "correct_target_language + clear_explanation",
+    "context": null,
+    "expected_in_response": ["aufstehen", "stehe", "auf"]
   },
   {
-    "id": "q05",
-    "language": "German",
+    "id": "de-03",
+    "language": "독일어",
     "question": "카페에서 커피를 주문하는 독일어 대화를 만들어주세요.",
-    "focus": "correct_target_language + answer_completeness"
+    "focus": "correct_target_language + translation_inline",
+    "context": null,
+    "expected_in_response": ["Kaffee", "bitte"]
+  },
+  {
+    "id": "de-04-rag",
+    "language": "독일어",
+    "question": "이 페이지에 나온 문법 규칙을 설명해주세요.",
+    "focus": "answer_grounded_in_context",
+    "context": [
+      "Lektion 5: Modalverben\n\nDie Modalverben im Deutschen sind: können, müssen, wollen, sollen, dürfen, mögen.\n\nKonjugation von 'können':\nich kann, du kannst, er/sie/es kann, wir können, ihr könnt, sie/Sie können\n\nBeispiel: Ich kann gut schwimmen. Kannst du mir helfen?"
+    ],
+    "expected_in_response": ["können", "Modalverb"]
+  },
+  {
+    "id": "de-05-rag",
+    "language": "독일어",
+    "question": "이 단원의 주요 어휘를 정리해주세요.",
+    "focus": "answer_grounded_in_context + answer_completeness",
+    "context": [
+      "Wortschatz Lektion 3: Im Restaurant\n\ndie Speisekarte (-n) - 메뉴판\nbestellen - 주문하다\ndie Rechnung (-en) - 계산서\ndas Trinkgeld (-er) - 팁\nder Kellner (-) / die Kellnerin (-nen) - 웨이터/웨이트리스\nschmecken - 맛이 나다\nlecker - 맛있는\ndie Vorspeise (-n) - 전채 요리\ndie Hauptspeise (-n) - 메인 요리\ndie Nachspeise (-n) - 디저트"
+    ],
+    "expected_in_response": ["Speisekarte", "bestellen", "Rechnung"]
+  },
+  {
+    "id": "en-01",
+    "language": "영어",
+    "question": "현재완료와 과거시제의 차이점을 설명해주세요.",
+    "focus": "correct_target_language + clear_explanation",
+    "context": null,
+    "expected_in_response": ["have", "has", "past"]
+  },
+  {
+    "id": "en-02-rag",
+    "language": "영어",
+    "question": "이 페이지의 문법 포인트를 설명해주세요.",
+    "focus": "answer_grounded_in_context",
+    "context": [
+      "Unit 7: Conditional Sentences\n\nType 1 (Real/Possible): If + present simple, will + base verb\nExample: If it rains, I will stay home.\n\nType 2 (Unreal/Hypothetical): If + past simple, would + base verb\nExample: If I had more time, I would travel the world.\n\nNote: In Type 2, we use 'were' instead of 'was' for formal English.\nExample: If I were you, I would study harder."
+    ],
+    "expected_in_response": ["conditional", "if"]
+  },
+  {
+    "id": "ja-01",
+    "language": "일본어",
+    "question": "일본어 て형(te-form)을 만드는 방법을 알려주세요.",
+    "focus": "correct_target_language + answer_completeness",
+    "context": null,
+    "expected_in_response": ["て"]
+  },
+  {
+    "id": "ja-02-rag",
+    "language": "일본어",
+    "question": "이 단원에서 배운 표현들을 정리해주세요.",
+    "focus": "answer_grounded_in_context + format_bold",
+    "context": [
+      "第3課：買い物\n\nいくらですか。 - 얼마예요?\nこれをください。 - 이것 주세요.\nちょっと高いですね。 - 좀 비싸네요.\nもう少し安くなりませんか。 - 좀 더 싸게 안 될까요?\nカードで払えますか。 - 카드로 결제할 수 있나요?\nおつりです。 - 거스름돈입니다.\nレシートをお願いします。 - 영수증 부탁합니다."
+    ],
+    "expected_in_response": ["いくら", "ください"]
+  },
+  {
+    "id": "zh-01",
+    "language": "중국어",
+    "question": "중국어 양사(量词)의 개념과 주요 양사를 알려주세요.",
+    "focus": "correct_target_language + clear_explanation",
+    "context": null,
+    "expected_in_response": ["个", "量词"]
+  },
+  {
+    "id": "fr-01",
+    "language": "프랑스어",
+    "question": "프랑스어 관사(le, la, les, un, une, des)의 사용법을 설명해주세요.",
+    "focus": "correct_target_language + answer_completeness",
+    "context": null,
+    "expected_in_response": ["le", "la", "les"]
+  },
+  {
+    "id": "es-01",
+    "language": "스페인어",
+    "question": "스페인어 ser와 estar의 차이를 설명해주세요.",
+    "focus": "correct_target_language + no_hallucination",
+    "context": null,
+    "expected_in_response": ["ser", "estar"]
   }
 ]

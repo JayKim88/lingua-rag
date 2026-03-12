@@ -85,7 +85,7 @@
   - 긴 페이지 (>3000자): 문단 분할
   - 메타데이터: `{ page_number }`
 
-- [ ] **DB 마이그레이션 실행** — `002_index_status.sql` Supabase SQL 에디터에서 실행 필요
+- [x] **DB 마이그레이션 실행** — `002_index_status.sql` Supabase SQL 에디터에서 실행 완료 (2026-03-12)
 
 ---
 
@@ -115,12 +115,17 @@
   - 타겟: 교재 PDF로 외국어 공부하는 사람 (독일어에 한정하지 않음)
   - 온보딩: 소개 게시물 + in-app 피드백
 
-- [ ] **범용 Eval 재설계**
-  - 독일어 format 규칙 대신 범용 규칙:
-    - `answer_grounded_in_pdf`: RAG 컨텍스트 기반 답변인가?
-    - `correct_language`: 학습 대상 언어로 예시를 제공하는가?
-    - `answer_completeness`: 질문에 완전히 답했는가?
-  - RAG 품질 측정: Context Precision, Context Recall
+- [x] **범용 Eval 재설계** — 2026-03-12
+  - 8개 범용 규칙: 콘텐츠 품질(5) + 형식(3)
+    - `answer_grounded_in_context`: RAG 컨텍스트 기반 답변
+    - `correct_target_language`: 올바른 학습 언어 사용
+    - `answer_completeness`: 답변 완결성
+    - `no_hallucination`: 허위 정보 없음
+    - `clear_explanation`: 명확한 설명
+    - `format_bold` / `format_no_table` / `translation_inline`
+  - RAG Keyword Recall 메트릭 (ground truth 기반)
+  - 12개 다국어 테스트셋 (독/영/일/중/프/스), RAG 포함 4개
+  - `--language` 필터, `--concurrency` 병렬 평가 지원
 
 - [ ] **CI/CD 파이프라인**
   - GitHub Actions: build + lint + deploy
