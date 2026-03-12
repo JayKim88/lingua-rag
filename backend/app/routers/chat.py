@@ -138,6 +138,7 @@ async def chat_endpoint(
                     results = await vector_repo.search(
                         query_embedding=query_vec,
                         pdf_id=pdf_id,
+                        query_text=body.message,
                         limit=3,
                         exclude_page=exclude_page,
                     )

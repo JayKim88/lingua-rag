@@ -127,9 +127,10 @@ async def index_pdf(user_id: UUID, pdf_id: str) -> None:
                 await conn.execute(
                     """
                     INSERT INTO document_chunks
-                      (id, pdf_id, chunk_index, page_number, content, embedding, metadata, created_at)
+                      (id, pdf_id, chunk_index, page_number, content, embedding, tsv, metadata, created_at)
                     VALUES
-                      (gen_random_uuid(), $1, $2, $3, $4, $5::vector, $6::jsonb, NOW())
+                      (gen_random_uuid(), $1, $2, $3, $4, $5::vector,
+                       to_tsvector('simple', $4), $6::jsonb, NOW())
                     """,
                     pdf_id,
                     idx,

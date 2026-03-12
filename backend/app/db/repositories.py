@@ -520,62 +520,144 @@ class PdfFileRepository:
 
 
 class VectorSearchRepository:
-    """pgvector similarity search for RAG."""
+    """Hybrid search for RAG: pgvector (semantic) + tsvector (keyword) with RRF fusion."""
+
+    # Reciprocal Rank Fusion constant (standard value from the RRF paper)
+    RRF_K = 60
 
     async def search(
         self,
         query_embedding: list[float],
         pdf_id: str,
+        query_text: str = "",
         limit: int = 3,
         max_distance: float = 0.7,
         exclude_page: int | None = None,
     ) -> list[dict[str, Any]]:
         """
-        Return document chunks most similar to query_embedding for a given PDF.
+        Hybrid search combining vector similarity and full-text keyword matching.
 
-        Uses cosine distance (<=>). Lower distance = more similar.
-        Chunks with distance >= max_distance are excluded.
-        If exclude_page is set, chunks from that page are skipped (avoids
-        duplicating Vision context).
+        1. Vector search: cosine distance via pgvector
+        2. Keyword search: ts_rank via PostgreSQL tsvector (BM25-like)
+        3. Reciprocal Rank Fusion (RRF) merges both ranked lists
+
+        Falls back to vector-only when query_text is empty or tsv column is absent.
         """
         pool = get_pool()
         embedding_str = f"[{','.join(map(str, query_embedding))}]"
 
+        # Build WHERE clause fragments
+        page_filter = ""
+        params_base: list = [embedding_str, pdf_id, max_distance]
+
         if exclude_page is not None:
-            query = """
-                SELECT content, metadata, page_number,
-                       embedding <=> $1::vector AS distance
+            page_filter = f"AND (page_number IS NULL OR page_number != ${len(params_base) + 1})"
+            params_base.append(exclude_page)
+
+        # Try hybrid search if query_text is provided
+        if query_text.strip():
+            try:
+                return await self._hybrid_search(
+                    pool, embedding_str, pdf_id, query_text, limit, max_distance, exclude_page
+                )
+            except Exception as ex:
+                # Graceful fallback: tsv column might not exist yet (pre-migration)
+                logger.warning("Hybrid search failed, falling back to vector-only: %s", ex)
+
+        # Vector-only fallback
+        query = f"""
+            SELECT content, metadata, page_number,
+                   embedding <=> $1::vector AS distance
+            FROM document_chunks
+            WHERE pdf_id = $2
+              AND embedding <=> $1::vector < $3
+              {page_filter}
+            ORDER BY distance
+            LIMIT ${len(params_base) + 1}
+        """
+        params_base.append(limit)
+
+        async with pool.acquire() as conn:
+            records = await conn.fetch(query, *params_base)
+        return [_record_to_dict(r) for r in records]
+
+    async def _hybrid_search(
+        self,
+        pool,
+        embedding_str: str,
+        pdf_id: str,
+        query_text: str,
+        limit: int,
+        max_distance: float,
+        exclude_page: int | None,
+    ) -> list[dict[str, Any]]:
+        """Execute hybrid search with RRF fusion in a single SQL query."""
+        page_filter = ""
+        params: list = [embedding_str, pdf_id, max_distance]
+        next_idx = 4
+
+        if exclude_page is not None:
+            page_filter = f"AND (page_number IS NULL OR page_number != ${next_idx})"
+            params.append(exclude_page)
+            next_idx += 1
+
+        # Use plainto_tsquery('simple', ...) for language-agnostic keyword matching
+        tsquery_param = f"${next_idx}"
+        params.append(query_text)
+        next_idx += 1
+
+        k = self.RRF_K
+        limit_param = f"${next_idx}"
+        params.append(limit)
+
+        # Fetch more candidates than needed for better RRF fusion
+        candidate_limit = limit * 5
+
+        query = f"""
+            WITH vector_results AS (
+                SELECT id, content, metadata, page_number,
+                       embedding <=> $1::vector AS distance,
+                       ROW_NUMBER() OVER (ORDER BY embedding <=> $1::vector) AS vec_rank
                 FROM document_chunks
                 WHERE pdf_id = $2
                   AND embedding <=> $1::vector < $3
-                  AND (page_number IS NULL OR page_number != $5)
+                  {page_filter}
                 ORDER BY distance
-                LIMIT $4
-            """
-            async with pool.acquire() as conn:
-                records = await conn.fetch(
-                    query,
-                    embedding_str,
-                    pdf_id,
-                    max_distance,
-                    limit,
-                    exclude_page,
-                )
-        else:
-            async with pool.acquire() as conn:
-                records = await conn.fetch(
-                    """
-                    SELECT content, metadata, page_number,
-                           embedding <=> $1::vector AS distance
-                    FROM document_chunks
-                    WHERE pdf_id = $2
-                      AND embedding <=> $1::vector < $3
-                    ORDER BY distance
-                    LIMIT $4
-                    """,
-                    embedding_str,
-                    pdf_id,
-                    max_distance,
-                    limit,
-                )
+                LIMIT {candidate_limit}
+            ),
+            keyword_results AS (
+                SELECT id, content, metadata, page_number,
+                       ts_rank(tsv, plainto_tsquery('simple', {tsquery_param})) AS kw_score,
+                       ROW_NUMBER() OVER (
+                           ORDER BY ts_rank(tsv, plainto_tsquery('simple', {tsquery_param})) DESC
+                       ) AS kw_rank
+                FROM document_chunks
+                WHERE pdf_id = $2
+                  AND tsv @@ plainto_tsquery('simple', {tsquery_param})
+                  {page_filter}
+                LIMIT {candidate_limit}
+            ),
+            fused AS (
+                SELECT
+                    COALESCE(v.id, k.id) AS id,
+                    COALESCE(v.content, k.content) AS content,
+                    COALESCE(v.metadata, k.metadata) AS metadata,
+                    COALESCE(v.page_number, k.page_number) AS page_number,
+                    v.distance,
+                    COALESCE(1.0 / ({k} + v.vec_rank), 0) AS rrf_vec,
+                    COALESCE(1.0 / ({k} + k.kw_rank), 0) AS rrf_kw,
+                    COALESCE(1.0 / ({k} + v.vec_rank), 0)
+                      + COALESCE(1.0 / ({k} + k.kw_rank), 0) AS rrf_score
+                FROM vector_results v
+                FULL OUTER JOIN keyword_results k ON v.id = k.id
+            )
+            SELECT content, metadata, page_number, distance,
+                   rrf_vec, rrf_kw, rrf_score
+            FROM fused
+            ORDER BY rrf_score DESC
+            LIMIT {limit_param}
+        """
+
+        async with pool.acquire() as conn:
+            records = await conn.fetch(query, *params)
         return [_record_to_dict(r) for r in records]

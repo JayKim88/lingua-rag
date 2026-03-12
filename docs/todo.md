@@ -136,7 +136,13 @@
 
 ## Phase 5: 차별화 (보너스)
 
-- [ ] Hybrid Search (BM25 + vector) — 키워드 vs 의미 검색 결합
+- [x] **Hybrid Search (BM25 + vector)** — 2026-03-12
+  - PostgreSQL `tsvector` + `plainto_tsquery('simple', ...)` for keyword search
+  - pgvector cosine distance for semantic search
+  - Reciprocal Rank Fusion (RRF, k=60) 으로 두 결과 합산
+  - `indexing_service.py`: 인덱싱 시 `tsv` 컬럼 자동 생성
+  - graceful fallback: `tsv` 미존재 시 vector-only 검색
+  - DB 마이그레이션: `004_hybrid_search.sql`
 - [ ] Observability (비용 대시보드, LangSmith 연동)
 - [ ] 임베딩 모델 비교 (multilingual-e5-large vs text-embedding-3-small)
 - [ ] 다국어 TTS 자동 감지 (PDF 언어 → TTS 언어 자동 설정)
