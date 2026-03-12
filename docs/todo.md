@@ -146,7 +146,10 @@
 - [x] **Observability** — 2026-03-12
   - `GET /api/stats`: 토큰 사용량, RAG 히트율, 비용 추정 (Claude + OpenAI 임베딩)
   - 일별 사용량 (14일), PDF별 breakdown (top 10)
-- [ ] 임베딩 모델 비교 (multilingual-e5-large vs text-embedding-3-small)
+- [x] **임베딩 모델 비교** — 2026-03-12
+  - `scripts/compare_embeddings.py`: Hit@K, MRR, cosine separation 벤치마크
+  - `docs/embedding-comparison.md`: 스펙/비용/인프라/다국어 성능 분석
+  - 결론: 현행 `text-embedding-3-small` 유지 (비용/인프라 우위, Hybrid Search 보완)
 - [x] **다국어 TTS 자동 감지** — 2026-03-12
   - PDF 인덱싱 시 텍스트 기반 언어 자동 감지 (`language_detect.py`)
   - Unicode 스크립트 분석 (CJK) + 기능어 빈도 매칭 (Latin script 6개 언어)
