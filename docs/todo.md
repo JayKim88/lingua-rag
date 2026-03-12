@@ -56,8 +56,9 @@
 
 ### Scripts 정리
 
-- [ ] **evaluate.py: 독일어 규칙 제거** — Phase 4에서 범용 eval로 재설계
-- [ ] **index_pdf.py / index_wortliste.py** — Phase 2에서 API 엔드포인트로 대체
+- [x] **evaluate.py: 범용 skeleton으로 재작성** — 독일어 규칙(6개) 제거, 범용 규칙(5개)으로 전환, `DOKDOKDOK_A1` import 제거
+- [x] **index_pdf.py / index_wortliste.py 삭제** — Phase 2 API 엔드포인트로 대체 예정, 드롭된 DB 컬럼 참조로 깨진 상태
+- [x] **test_questions.json: 범용 포맷으로 전환** — `unit_id/level` 제거, `language` 필드 추가
 
 ---
 

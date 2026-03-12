@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-LinguaRAG LLM-as-Judge Evaluator (v0.3 Phase 1)
+LinguaRAG LLM-as-Judge Evaluator — Universal Skeleton (Phase 4 placeholder).
 
-Sends fixed test questions to Claude with the production system prompt,
-then uses a separate Claude call to evaluate ANSWER_FORMAT rule compliance.
+Sends test questions to Claude with the production system prompt,
+then uses a separate Claude call to evaluate answer quality rules.
+
+Phase 4 TODO:
+  - Design universal evaluation rules (answer_grounded_in_pdf, correct_language, etc.)
+  - Create test question sets per language
+  - Add Context Precision / Context Recall metrics
 
 Usage:
     cd /path/to/lingua-rag
-    python scripts/evaluate.py
     python scripts/evaluate.py --questions scripts/test_questions.json
-    python scripts/evaluate.py --output scripts/results
 
 Requirements:
     ANTHROPIC_API_KEY must be set.
@@ -31,93 +34,83 @@ REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT / "backend"))
 
 from app.data.prompts import build_system_prompt  # noqa: E402
-from app.data.units import DOKDOKDOK_A1           # noqa: E402
 import anthropic                                   # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-TUTOR_MODEL = "claude-sonnet-4-6"          # same as production
-JUDGE_MODEL = "claude-sonnet-4-6"  # sonnet for accurate rule evaluation
+TUTOR_MODEL = "claude-sonnet-4-6"
+JUDGE_MODEL = "claude-sonnet-4-6"
 MAX_TOKENS_TUTOR = 1024
 MAX_TOKENS_JUDGE = 1024
 
+# Universal rules — language-agnostic quality criteria
 RULES = [
-    "german_bold_complete",
-    "no_markdown_table",
-    "translation_inline",
-    "dialogue_structure",   # null = N/A (no dialogue in response)
-    "example_length_ok",
-    "tip_included",
+    "answer_grounded_in_context",
+    "correct_target_language",
+    "answer_completeness",
+    "no_hallucination",
+    "clear_explanation",
 ]
 
 RULE_LABELS = {
-    "german_bold_complete": "독일어 bold 완결성",
-    "no_markdown_table":    "표 금지",
-    "translation_inline":   "번역 즉시 배치",
-    "dialogue_structure":   "대화 A:/B: 구조",
-    "example_length_ok":    "예문 길이 ≤10단어",
-    "tip_included":         "💡 팁: 포함",
+    "answer_grounded_in_context": "컨텍스트 기반 답변",
+    "correct_target_language":    "올바른 학습 언어 사용",
+    "answer_completeness":        "답변 완결성",
+    "no_hallucination":           "허위 정보 없음",
+    "clear_explanation":          "명확한 설명",
 }
 
 JUDGE_PROMPT = """\
-당신은 독일어 AI 튜터 응답의 형식 준수 여부를 평가하는 심사자입니다.
-아래 응답이 6가지 형식 규칙을 각각 준수하는지 평가하고, 반드시 JSON만 반환하세요.
+You are a judge evaluating an AI language tutor's response quality.
+Evaluate whether the response follows these 5 universal rules, and return JSON only.
 
 ---
-질문: {question}
+Question: {question}
 
-응답:
+Response:
 {response}
+
+Context (RAG chunks provided to tutor, if any):
+{context}
 ---
 
-평가 규칙:
+Evaluation rules:
 
-1. german_bold_complete
-   응답 어디에서든(본문, 괄호, 설명문, 어휘 목록 포함) 독일어 단어·표현·문장이 `**...**`로 감싸졌는가.
-   위치 예외 없음 — 괄호 안에 있어도, 문장 중간에 있어도 bold 필수.
-   - PASS: 응답의 모든 독일어가 완전히 bold 처리됨
-   - FAIL: bold 없이 등장하는 독일어 단어/표현 존재 (reason에 위반 텍스트 직접 인용)
-   판정 기준: 독일어 단어(알파벳+독일어 문자)가 `**` 없이 나타나면 FAIL.
+1. answer_grounded_in_context
+   Is the answer grounded in the provided context (RAG chunks)?
+   - PASS: answer uses information from the context
+   - FAIL: answer fabricates information not in context
+   - null: no context was provided (free conversation)
 
-2. no_markdown_table
-   응답에 `|` 기호 기반 markdown 표가 없는가.
-   - PASS: `|` 기반 표 없음
-   - FAIL: `|` 기반 표 존재
+2. correct_target_language
+   Does the response use the correct target language for examples?
+   - PASS: examples are in the expected language
+   - FAIL: wrong language used or mixed incorrectly
 
-3. translation_inline
-   각 독일어 줄 바로 뒤에 `→ 한국어` 번역이 따라오는가.
-   - PASS: 독일어 표현 직후 `→` 번역 배치
-   - FAIL: 번역을 나중에 몰아서 배치하거나 `/`로 합침
+3. answer_completeness
+   Does the response fully address the user's question?
+   - PASS: all parts of the question answered
+   - FAIL: parts of the question ignored or skipped
 
-4. dialogue_structure
-   대화 예문이 있을 경우 `A: **...** → ...` / `B: **...** → ...` 형식을 사용하는가.
-   - PASS: A:/B: 형식 + 줄별 번역 사용 (또는 대화 없음 → null)
-   - FAIL: 대화가 있는데 A:/B: 미사용 또는 줄별 번역 누락
-   - null: 대화 예문이 없는 응답
+4. no_hallucination
+   Is the response free from fabricated facts (grammar rules, vocabulary, etc.)?
+   - PASS: all facts are accurate
+   - FAIL: contains incorrect information
 
-5. example_length_ok
-   독일어 예문이 10단어 이내인가 (A1 기준, 공백 기준 단어 수).
-   - PASS: 모든 독일어 예문이 10단어 이하
-   - FAIL: 10단어 초과 예문 존재
+5. clear_explanation
+   Is the explanation clear and well-structured for a language learner?
+   - PASS: well-organized, easy to follow
+   - FAIL: confusing, disorganized, or overly complex
 
-6. tip_included
-   응답 마지막 부분에 `💡 팁:` 이 포함되어 있는가.
-   - PASS: `💡 팁:` 줄 존재
-   - FAIL: 없음
-
-반환 형식 (JSON만, 마크다운 코드 블록 없이):
-중요:
-- reason 필드는 반드시 한 줄 문자열(줄바꿈 없음)로 작성하세요.
-- pass 값과 reason이 반드시 일치해야 합니다. reason이 준수를 설명하면 pass: true, 위반을 설명하면 pass: false.
+Return format (JSON only, no markdown code blocks):
 {{
   "rules": {{
-    "german_bold_complete": {{"pass": true, "reason": "간략 이유"}},
-    "no_markdown_table": {{"pass": true, "reason": "간략 이유"}},
-    "translation_inline": {{"pass": false, "reason": "간략 이유"}},
-    "dialogue_structure": {{"pass": null, "reason": "대화 없음"}},
-    "example_length_ok": {{"pass": true, "reason": "간략 이유"}},
-    "tip_included": {{"pass": true, "reason": "간략 이유"}}
+    "answer_grounded_in_context": {{"pass": true, "reason": "brief reason"}},
+    "correct_target_language": {{"pass": true, "reason": "brief reason"}},
+    "answer_completeness": {{"pass": false, "reason": "brief reason"}},
+    "no_hallucination": {{"pass": true, "reason": "brief reason"}},
+    "clear_explanation": {{"pass": true, "reason": "brief reason"}}
   }}
 }}
 """
@@ -132,13 +125,13 @@ def load_questions(path: Path) -> list[dict]:
         return json.load(f)
 
 
-def get_system_prompt(unit_id: str, level: str) -> str:
-    unit_data = DOKDOKDOK_A1.get(unit_id)
-    return build_system_prompt(level, unit_id, unit_data)
+def get_system_prompt(language: str) -> str:
+    return build_system_prompt(language)
 
 
 async def get_tutor_response(client: anthropic.AsyncAnthropic, question: dict) -> str:
-    system_prompt = get_system_prompt(question["unit_id"], question["level"])
+    language = question.get("language", "German")
+    system_prompt = get_system_prompt(language)
     message = await client.messages.create(
         model=TUTOR_MODEL,
         max_tokens=MAX_TOKENS_TUTOR,
@@ -149,18 +142,15 @@ async def get_tutor_response(client: anthropic.AsyncAnthropic, question: dict) -
 
 
 def _parse_judge_json(raw: str) -> dict:
-    """Robustly extract JSON from judge response, handling common formatting issues."""
-    # Strip markdown code fences
+    """Robustly extract JSON from judge response."""
     raw = re.sub(r"^```(?:json)?\s*", "", raw.strip())
     raw = re.sub(r"\s*```$", "", raw)
 
-    # Try direct parse
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
         pass
 
-    # Find outermost JSON object boundaries and retry
     start = raw.find("{")
     end = raw.rfind("}") + 1
     if start != -1 and end > start:
@@ -172,8 +162,8 @@ def _parse_judge_json(raw: str) -> dict:
     raise ValueError(f"Cannot parse judge JSON: {raw[:300]}")
 
 
-async def judge_response(client: anthropic.AsyncAnthropic, question: str, response: str) -> dict:
-    prompt = JUDGE_PROMPT.format(question=question, response=response)
+async def judge_response(client: anthropic.AsyncAnthropic, question: str, response: str, context: str = "N/A") -> dict:
+    prompt = JUDGE_PROMPT.format(question=question, response=response, context=context)
     for attempt in range(2):
         message = await client.messages.create(
             model=JUDGE_MODEL,
@@ -191,16 +181,16 @@ async def judge_response(client: anthropic.AsyncAnthropic, question: str, respon
 async def evaluate_question(
     client: anthropic.AsyncAnthropic, question: dict, index: int, total: int
 ) -> dict:
-    print(f"  [{index}/{total}] {question['id']} ({question['unit_id']}) "
-          f"— {question['question'][:50]}...")
+    q_id = question.get("id", f"q{index:02d}")
+    print(f"  [{index}/{total}] {q_id} — {question['question'][:50]}...")
     try:
         response = await get_tutor_response(client, question)
         print(f"         → 응답 수신 ({len(response)}자)")
         judgment = await judge_response(client, question["question"], response)
         return {
-            "id": question["id"],
-            "unit_id": question["unit_id"],
+            "id": q_id,
             "question": question["question"],
+            "language": question.get("language", "German"),
             "focus": question.get("focus", ""),
             "response": response,
             "judgment": judgment,
@@ -209,9 +199,9 @@ async def evaluate_question(
     except Exception as e:
         print(f"         ✗ 오류: {e}")
         return {
-            "id": question["id"],
-            "unit_id": question["unit_id"],
+            "id": q_id,
             "question": question["question"],
+            "language": question.get("language", "German"),
             "focus": question.get("focus", ""),
             "response": None,
             "judgment": None,
@@ -247,7 +237,6 @@ def compute_report(results: list[dict]) -> dict:
             else:
                 rule_stats[rule]["error"] += 1
 
-    # Pass rate: exclude N/A and errors from denominator
     rule_rates: dict[str, float | None] = {}
     for rule in RULES:
         s = rule_stats[rule]
@@ -296,7 +285,6 @@ def print_report(report: dict) -> None:
         err_str = f"  (오류 {stats['error']}건)" if stats["error"] > 0 else ""
         print(f"  {RULE_LABELS[rule]:<20} {rate_str}   {bar}{na_str}{err_str}")
 
-    # Per-question failure detail
     failures = [
         r for r in report["results"]
         if r["judgment"] and any(
@@ -310,7 +298,7 @@ def print_report(report: dict) -> None:
         for r in failures:
             rules = r["judgment"]["rules"]
             failed = [RULE_LABELS[k] for k, v in rules.items() if v.get("pass") is False]
-            print(f"    {r['id']} ({r['unit_id']}): {', '.join(failed)}")
+            print(f"    {r['id']}: {', '.join(failed)}")
             for k, v in rules.items():
                 if v.get("pass") is False:
                     print(f"      - {RULE_LABELS[k]}: {v.get('reason', '')}")
@@ -322,7 +310,7 @@ def print_report(report: dict) -> None:
 # ---------------------------------------------------------------------------
 
 async def main() -> None:
-    parser = argparse.ArgumentParser(description="LinguaRAG LLM-as-Judge Evaluator")
+    parser = argparse.ArgumentParser(description="LinguaRAG LLM-as-Judge Evaluator (Universal)")
     parser.add_argument(
         "--questions",
         default=str(REPO_ROOT / "scripts" / "test_questions.json"),
@@ -359,7 +347,6 @@ async def main() -> None:
     report = compute_report(results)
     print_report(report)
 
-    # Save JSON report
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y-%m-%d_%H%M")

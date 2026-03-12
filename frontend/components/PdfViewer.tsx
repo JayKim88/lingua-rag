@@ -437,22 +437,32 @@ function PdfViewerInner(
   }, [pdfReady]);
 
   // IntersectionObserver: update pageNumber to the most visible page
+  const pageRatios = useRef<Map<number, number>>(new Map());
+
   useEffect(() => {
     if (numPages === 0) return;
     const container = containerRef.current;
     if (!container) return;
+    pageRatios.current.clear();
 
     const obs = new IntersectionObserver(
       (entries) => {
-        let best: { page: number; ratio: number } | null = null;
         for (const entry of entries) {
           const page = Number((entry.target as HTMLElement).dataset.page);
-          if (!best || entry.intersectionRatio > best.ratio) {
-            best = { page, ratio: entry.intersectionRatio };
+          pageRatios.current.set(page, entry.intersectionRatio);
+        }
+
+        if (!pdfReadyRef.current) return;
+
+        let bestPage = 0;
+        let bestRatio = 0;
+        for (const [page, ratio] of pageRatios.current) {
+          if (ratio > bestRatio) {
+            bestRatio = ratio;
+            bestPage = page;
           }
         }
-        if (best && best.ratio > 0 && pdfReadyRef.current)
-          setPageNumber(best.page);
+        if (bestPage > 0 && bestRatio > 0) setPageNumber(bestPage);
       },
       {
         root: container.querySelector(".pdf-scroll-area"),
@@ -582,6 +592,35 @@ function PdfViewerInner(
   const [selectionRects, setSelectionRects] = useState<
     { left: number; top: number; width: number; height: number }[]
   >([]);
+
+  // Dismiss selection popup & highlights on scroll
+  const popupRef = useRef(popup);
+  const selectionRectsRef = useRef(selectionRects);
+  popupRef.current = popup;
+  selectionRectsRef.current = selectionRects;
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const scrollArea = container.querySelector(".pdf-scroll-area");
+    if (!scrollArea) return;
+
+    const handleScroll = () => {
+      if (popupRef.current || selectionRectsRef.current.length > 0) {
+        setPopup(null);
+        setSelectionRects([]);
+        setPopupTranslation(null);
+        window.getSelection()?.removeAllRanges();
+        // Reset drag state so next mousedown starts cleanly
+        isDragging.current = false;
+        dragStartPoint.current = null;
+      }
+    };
+
+    scrollArea.addEventListener("scroll", handleScroll, { passive: true });
+    return () => scrollArea.removeEventListener("scroll", handleScroll);
+  }, [numPages]); // re-attach after PDF loads and scroll area mounts
+
   const isDragging = useRef(false);
   // Cache: textContent items + viewport for the current page
   const textContentCache = useRef<{
