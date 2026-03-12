@@ -134,10 +134,29 @@ async def index_pdf(user_id: UUID, pdf_id: str) -> None:
         BATCH_SIZE = 50
         all_embeddings: list[list[float]] = []
 
+        failed_batches = 0
+        successful_chunks: list[dict] = []
         for i in range(0, len(all_chunks), BATCH_SIZE):
-            batch_texts = [c["content"] for c in all_chunks[i : i + BATCH_SIZE]]
-            batch_embeddings = await embedding_svc.embed_batch(batch_texts)
-            all_embeddings.extend(batch_embeddings)
+            batch = all_chunks[i : i + BATCH_SIZE]
+            batch_texts = [c["content"] for c in batch]
+            try:
+                batch_embeddings = await embedding_svc.embed_batch(batch_texts)
+                all_embeddings.extend(batch_embeddings)
+                successful_chunks.extend(batch)
+            except Exception as e:
+                failed_batches += 1
+                batch_num = i // BATCH_SIZE + 1
+                logger.warning(
+                    "Indexing %s: batch %d failed (chunks %d-%d), skipping. Error: %s",
+                    pdf_id, batch_num, i, min(i + BATCH_SIZE, len(all_chunks)) - 1, e,
+                )
+
+        if failed_batches:
+            logger.warning("Indexing %s: %d batch(es) skipped due to errors", pdf_id, failed_batches)
+        all_chunks = successful_chunks
+
+        if not all_chunks:
+            raise RuntimeError(f"All embedding batches failed for {pdf_id}")
 
         # 5. Delete old chunks for this PDF, then insert new ones
         async with pool.acquire() as conn:

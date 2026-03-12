@@ -17,11 +17,13 @@ import "react-pdf/dist/Page/AnnotationLayer.css";
 import {
   savePdfToLibrary,
   loadPdfFromLibrary,
+  migratePdfKey,
   deletePdfFromLibrary,
   getLibraryMeta,
   upsertLibraryMeta,
   removeLibraryMeta,
-  setLibraryMetaServerId,
+  setLibraryMetaPdfServerId,
+  generateChatId,
   LIBRARY_CURRENT_KEY,
   type PdfMeta,
 } from "@/lib/pdfLibrary";
@@ -104,125 +106,6 @@ function formatLastOpened(iso: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// TOC helpers
-// ---------------------------------------------------------------------------
-interface TocItem {
-  title: string;
-  page: number;
-  level: number;
-}
-
-async function flattenOutline(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  pdf: any,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  items: any[],
-  level: number,
-): Promise<TocItem[]> {
-  const result: TocItem[] = [];
-  for (const item of items) {
-    let page: number | null = null;
-    try {
-      if (Array.isArray(item.dest) && item.dest[0]) {
-        page = (await pdf.getPageIndex(item.dest[0])) + 1;
-      } else if (typeof item.dest === "string") {
-        const dest = await pdf.getDestination(item.dest);
-        if (dest?.[0]) page = (await pdf.getPageIndex(dest[0])) + 1;
-      }
-    } catch {
-      /* skip unresolvable dest */
-    }
-    if (page !== null) result.push({ title: item.title ?? "", page, level });
-    if (item.items?.length) {
-      result.push(...(await flattenOutline(pdf, item.items, level + 1)));
-    }
-  }
-  return result;
-}
-
-// Auto-generate TOC from text content when PDF has no built-in outline.
-// Identifies headings by font size: items with fontSize > median * 1.4 are candidates.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function generateTocFromContent(
-  pdf: any,
-  numPages: number,
-): Promise<TocItem[]> {
-  interface Raw {
-    str: string;
-    fontSize: number;
-    page: number;
-    y: number;
-  }
-  const all: Raw[] = [];
-
-  for (let p = 1; p <= numPages; p++) {
-    try {
-      const page = await pdf.getPage(p);
-      const content = await page.getTextContent();
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      for (const item of content.items as any[]) {
-        const str = (item.str ?? "").trim();
-        if (!str) continue;
-        const t = item.transform as number[];
-        const sz = Math.abs(t?.[3] ?? 0);
-        if (sz > 0) all.push({ str, fontSize: sz, page: p, y: t?.[5] ?? 0 });
-      }
-    } catch {
-      /* skip unreadable page */
-    }
-  }
-
-  if (all.length < 5) return [];
-
-  const sorted = [...all.map((i) => i.fontSize)].sort((a, b) => a - b);
-  const median = sorted[Math.floor(sorted.length / 2)];
-  if (!median) return [];
-
-  const thresh = median * 1.4;
-  const cands = all.filter(
-    (i) =>
-      i.fontSize > thresh &&
-      i.str.length >= 2 &&
-      i.str.length <= 100 &&
-      !/^\d+$/.test(i.str),
-  );
-  if (!cands.length) return [];
-
-  // Merge consecutive items on the same page + same line (y within 3 units) → one heading
-  const lines: { str: string; fontSize: number; page: number; y: number }[] =
-    [];
-  for (const c of cands) {
-    const last = lines[lines.length - 1];
-    if (last && last.page === c.page && Math.abs(last.y - c.y) <= 3) {
-      last.str += " " + c.str;
-    } else {
-      lines.push({ str: c.str, fontSize: c.fontSize, page: c.page, y: c.y });
-    }
-  }
-
-  // Map top-3 distinct font sizes → heading levels 0, 1, 2
-  const distinctSizes = [
-    ...new Set(lines.map((l) => Math.round(l.fontSize * 2) / 2)),
-  ]
-    .sort((a, b) => b - a)
-    .slice(0, 3);
-  const getLevel = (sz: number) => {
-    const r = Math.round(sz * 2) / 2;
-    const idx = distinctSizes.findIndex((s) => s === r);
-    return idx < 0 ? 0 : idx;
-  };
-
-  const seen = new Set<string>();
-  return lines
-    .filter((l) => {
-      const key = `${l.page}:${l.str}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
-    .map((l) => ({ title: l.str, page: l.page, level: getLevel(l.fontSize) }));
-}
-
 // ---------------------------------------------------------------------------
 // Search helpers
 // ---------------------------------------------------------------------------
@@ -257,6 +140,7 @@ interface SelectionPopup {
 
 export interface PdfViewerHandle {
   getPageText: () => Promise<string | null>;
+  getNumPages: () => number;
   hasFile: () => boolean;
 }
 
@@ -272,7 +156,7 @@ interface PdfViewerProps {
   onLanguageChange: (lang: string | null) => void;
   openFile?: File | null; // external file to open (set by parent modal)
   onClose?: () => void; // called when the viewer's close button is clicked
-  parentServerId?: string | null; // server ID set by parent after upload
+  pdfServerId?: string | null; // server PDF ID (set by parent after upload)
 }
 
 const STICKY_COLORS: Record<string, { header: string; body: string }> = {
@@ -292,7 +176,7 @@ function PdfViewerInner(
     onLanguageChange,
     openFile,
     onClose,
-    parentServerId,
+    pdfServerId: pdfServerIdProp,
   }: PdfViewerProps,
   ref: React.ForwardedRef<PdfViewerHandle>,
 ) {
@@ -334,8 +218,21 @@ function PdfViewerInner(
   const [pageHeight, setPageHeight] = useState<number>(0);
   const [pdfReady, setPdfReady] = useState(false); // true after page restore + first render
 
-  // Server-side PDF ID (for annotations)
-  const [serverId, setServerId] = useState<string | null>(null);
+  // Server-side PDF ID (for annotations, language, last-page, etc.)
+  const [pdfServerId, setPdfServerId] = useState<string | null>(null);
+  // Monotonic counter to force Document remount on every file change
+  const [fileGeneration, setFileGeneration] = useState(0);
+
+  // Spotlight search drag state (percentage-based for responsive)
+  const [spotlightPos, setSpotlightPos] = useState<{ x: number; y: number }>(() => {
+    if (typeof window === "undefined") return { x: 50, y: 5 };
+    try {
+      const saved = localStorage.getItem("lingua_spotlight_pos");
+      return saved ? JSON.parse(saved) : { x: 50, y: 5 };
+    } catch { return { x: 50, y: 5 }; }
+  });
+  const spotlightDrag = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
+  const spotlightRef = useRef<HTMLDivElement>(null);
 
   // Annotation state
   const [isStickyMode, setIsStickyMode] = useState(false);
@@ -363,14 +260,7 @@ function PdfViewerInner(
     yPct: number;
   } | null>(null);
 
-  // TOC state
-  const [toc, setToc] = useState<TocItem[]>([]);
-  const [tocIsGenerated, setTocIsGenerated] = useState(false); // true = auto-generated (no built-in outline)
-  const [showToc, setShowToc] = useState(false);
-  const tocLeaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const searchLeaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
+
 
   // Search state
   const [showSearch, setShowSearch] = useState(false);
@@ -378,6 +268,21 @@ function PdfViewerInner(
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // Highlight search terms on the PDF text layer
+  const searchHighlightRenderer = useCallback(
+    (textItem: { str: string }) => {
+      if (!searchQuery.trim()) return textItem.str;
+      const query = searchQuery.trim();
+      const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const regex = new RegExp(`(${escaped})`, "gi");
+      return textItem.str.replace(
+        regex,
+        '<mark style="background:rgba(250,204,21,0.5);color:inherit;padding:0;border-radius:2px">$1</mark>',
+      );
+    },
+    [searchQuery],
+  );
 
   const pageNumberRef = useRef(pageNumber);
   pageNumberRef.current = pageNumber;
@@ -412,10 +317,11 @@ function PdfViewerInner(
         }
       },
       getPageNumber: () => pageNumber,
+      getNumPages: () => numPages,
       hasFile: () => !!file,
-      getPdfId: () => serverId,
+      getPdfId: () => pdfServerId,
     }),
-    [pageNumber, file, serverId],
+    [pageNumber, numPages, file, pdfServerId],
   );
 
   const scrollToPage = useCallback(
@@ -477,16 +383,16 @@ function PdfViewerInner(
     return () => obs.disconnect();
   }, [numPages, scale]);
 
-  // Load all annotations in a single request when serverId changes
+  // Load all annotations in a single request when pdfServerId changes
   useEffect(() => {
-    if (!serverId) {
+    if (!pdfServerId) {
       setAnnotations([]);
       return;
     }
-    fetchAnnotations(serverId)
+    fetchAnnotations(pdfServerId)
       .then(setAnnotations)
       .catch(() => {});
-  }, [serverId]);
+  }, [pdfServerId]);
 
   // Pin drag — move annotation to new position on mouseup
   useEffect(() => {
@@ -537,8 +443,8 @@ function PdfViewerInner(
         ),
       );
       setDraggingPin(null);
-      if (serverId) {
-        await moveAnnotation(serverId, drag.ann.id, xPct, yPct);
+      if (pdfServerId) {
+        await moveAnnotation(pdfServerId, drag.ann.id, xPct, yPct);
       }
     };
 
@@ -548,23 +454,34 @@ function PdfViewerInner(
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [serverId]);
+  }, [pdfServerId]);
 
-  // Load saved language for this PDF when serverId is set
+  // Load saved language for this PDF when pdfServerId is set.
+  // If the user already chose a language (from the immediate modal), persist it to the server.
+  // Otherwise, auto-open the language picker so the user chooses.
   useEffect(() => {
-    if (!serverId) return;
-    onLanguageChange(null); // Reset to null before fetching PDF-specific language
-    fetchPdfLanguage(serverId)
-      .then((lang) => {
-        if (lang) onLanguageChange(lang);
+    if (!pdfServerId) return;
+    fetchPdfLanguage(pdfServerId)
+      .then((serverLang) => {
+        if (serverLang) {
+          // Server already has a language — use it
+          onLanguageChange(serverLang);
+        } else if (language) {
+          // User already selected a language before pdfServerId was ready — save it now
+          savePdfLanguage(pdfServerId, language).catch(() => {});
+        } else {
+          // No language at all — prompt user to choose
+          setPendingLang(null);
+          setShowLangModal(true);
+        }
       })
       .catch(() => {});
-  }, [serverId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pdfServerId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Restore last viewed page when PDF loads (serverId + numPages both ready)
+  // Restore last viewed page when PDF loads (pdfServerId + numPages both ready)
   useEffect(() => {
-    if (!serverId || numPages === 0) return;
-    fetchLastPage(serverId)
+    if (!pdfServerId || numPages === 0) return;
+    fetchLastPage(pdfServerId)
       .then((page) => {
         lastSavedPageRef.current = page;
         if (page > 1) scrollToPage(page, true);
@@ -573,21 +490,21 @@ function PdfViewerInner(
       .catch(() => {
         setPdfReady(true);
       });
-  }, [serverId, numPages]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pdfServerId, numPages]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-save last page with 1.5s debounce on pageNumber change
   useEffect(() => {
-    if (!serverId || pageNumber < 1) return;
+    if (!pdfServerId || pageNumber < 1) return;
     if (lastPageSaveTimer.current) clearTimeout(lastPageSaveTimer.current);
     lastPageSaveTimer.current = setTimeout(() => {
       if (pageNumber === lastSavedPageRef.current) return;
-      saveLastPage(serverId, pageNumber).catch(() => {});
+      saveLastPage(pdfServerId, pageNumber).catch(() => {});
       lastSavedPageRef.current = pageNumber;
     }, 1500);
     return () => {
       if (lastPageSaveTimer.current) clearTimeout(lastPageSaveTimer.current);
     };
-  }, [serverId, pageNumber]);
+  }, [pdfServerId, pageNumber]);
 
   // Separate state for drag/dblclick selection highlights (persists until focus-out)
   const [selectionRects, setSelectionRects] = useState<
@@ -636,24 +553,44 @@ function PdfViewerInner(
 
   // Open file passed from parent (modal selection) — parent handles upload, skip it here
   useEffect(() => {
-    if (openFile) handleFileChange(openFile, true);
+    if (openFile) {
+      handleFileChange(openFile, true);
+      // New upload (no server ID yet) → show language picker immediately
+      if (!pdfServerIdProp) {
+        setPendingLang(null);
+        setShowLangModal(true);
+      }
+    }
   }, [openFile]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Sync parentServerId from parent (set after parent-level upload completes)
+  // Sync pdfServerId prop from parent (set after parent-level upload completes)
   useEffect(() => {
-    if (parentServerId) setServerId(parentServerId);
-  }, [parentServerId]);
+    if (pdfServerIdProp) setPdfServerId(pdfServerIdProp);
+  }, [pdfServerIdProp]);
 
-  // Restore last-opened PDF on mount (+ restore serverId from meta)
+  // Restore last-opened PDF on mount (+ restore pdfServerId from meta)
   useEffect(() => {
-    const currentName = localStorage.getItem(LIBRARY_CURRENT_KEY);
-    if (!currentName) {
+    const currentChatId = localStorage.getItem(LIBRARY_CURRENT_KEY);
+    if (!currentChatId) {
       setIsRestoring(false);
       return;
     }
-    const meta = getLibraryMeta().find((m) => m.name === currentName);
-    if (meta?.serverId) setServerId(meta.serverId);
-    loadPdfFromLibrary(currentName).then((saved) => {
+    const library = getLibraryMeta();
+    // Try chatId lookup first; fallback to name for migration from old format
+    const meta = library.find((m) => m.chatId === currentChatId)
+      ?? library.find((m) => m.name === currentChatId);
+    if (!meta?.chatId) {
+      setIsRestoring(false);
+      return;
+    }
+    if (meta.pdfServerId) setPdfServerId(meta.pdfServerId);
+    // Update LIBRARY_CURRENT_KEY to chatId if it was stored as name
+    if (currentChatId !== meta.chatId) {
+      localStorage.setItem(LIBRARY_CURRENT_KEY, meta.chatId);
+    }
+    loadPdfFromLibrary(meta.chatId).then(async (saved) => {
+      // Migration: try old name-based key if chatId key not found
+      if (!saved) saved = await migratePdfKey(meta.name, meta.chatId!);
       if (saved) setFile(saved);
       setIsRestoring(false);
     });
@@ -679,8 +616,6 @@ function PdfViewerInner(
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "f" && file) {
         e.preventDefault();
-        if (searchLeaveTimerRef.current)
-          clearTimeout(searchLeaveTimerRef.current);
         setShowSearch(true);
         setTimeout(() => searchInputRef.current?.focus(), 50);
         return;
@@ -701,6 +636,30 @@ function PdfViewerInner(
       setTimeout(() => searchInputRef.current?.focus(), 50);
     }
   }, [showSearch]);
+
+  // Spotlight drag-to-move (uses document-level mousemove/mouseup for smooth dragging)
+  const spotlightPosRef = useRef(spotlightPos);
+  useEffect(() => {
+    const onMouseMove = (e: MouseEvent) => {
+      const d = spotlightDrag.current;
+      if (!d || !containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const xPct = d.origX + ((e.clientX - d.startX) / rect.width) * 100;
+      const yPct = d.origY + ((e.clientY - d.startY) / rect.height) * 100;
+      const next = { x: Math.max(5, Math.min(95, xPct)), y: Math.max(0, Math.min(80, yPct)) };
+      spotlightPosRef.current = next;
+      setSpotlightPos(next);
+    };
+    const onMouseUp = () => {
+      if (spotlightDrag.current) {
+        spotlightDrag.current = null;
+        localStorage.setItem("lingua_spotlight_pos", JSON.stringify(spotlightPosRef.current));
+      }
+    };
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+    return () => { document.removeEventListener("mousemove", onMouseMove); document.removeEventListener("mouseup", onMouseUp); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Debounced full-text search across all pages
   useEffect(() => {
@@ -1100,6 +1059,7 @@ function PdfViewerInner(
   const handleFileChange = useCallback((f: File, skipUpload = false) => {
     if (f.type !== "application/pdf") return;
     setFile(f);
+    setFileGeneration((g) => g + 1);
     setNumPages(0);
     setPageNumber(1);
     setPageHeight(0);
@@ -1110,21 +1070,22 @@ function PdfViewerInner(
     setShowSearch(false);
     setSearchQuery("");
     setSearchResults([]);
-    setToc([]);
-    setTocIsGenerated(false);
-    setShowToc(false);
     setAnnotations([]);
     setIsStickyMode(false);
     setPendingSticky(null);
     setEditingSticky(null);
     pdfDocRef.current = null;
 
-    const meta = upsertLibraryMeta(f);
-    const existing = meta.find((m) => m.name === f.name);
-    const existingServerId = existing?.serverId ?? null;
-    setServerId(existingServerId);
-    localStorage.setItem(LIBRARY_CURRENT_KEY, f.name);
-    savePdfToLibrary(f).catch(() => {
+    // Find or create chatId for this file
+    const library = getLibraryMeta();
+    const existingEntry = library.find((m) => m.name === f.name);
+    const chatId = existingEntry?.chatId ?? generateChatId();
+    const meta = upsertLibraryMeta(f, chatId);
+    const existing = meta.find((m) => m.chatId === chatId);
+    const existingServerId = existing?.pdfServerId ?? null;
+    setPdfServerId(existingServerId);
+    localStorage.setItem(LIBRARY_CURRENT_KEY, chatId);
+    savePdfToLibrary(f, chatId).catch(() => {
       /* ignore IDB errors */
     });
 
@@ -1136,8 +1097,8 @@ function PdfViewerInner(
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => {
           if (data?.id) {
-            setServerId(data.id);
-            setLibraryMetaServerId(f.name, data.id);
+            setPdfServerId(data.id);
+            setLibraryMetaPdfServerId(chatId, data.id);
           }
         })
         .catch(() => {
@@ -1164,9 +1125,6 @@ function PdfViewerInner(
     setShowSearch(false);
     setSearchQuery("");
     setSearchResults([]);
-    setToc([]);
-    setTocIsGenerated(false);
-    setShowToc(false);
     pdfDocRef.current = null;
     /* pageImage removed */ localStorage.removeItem(LIBRARY_CURRENT_KEY);
     onClose?.();
@@ -1260,306 +1218,6 @@ function PdfViewerInner(
         className="relative flex-1 flex flex-col overflow-hidden bg-gray-50"
         ref={containerRef}
       >
-        {/* Header */}
-        <div className="flex items-center justify-between px-3 py-2 bg-white border-b border-gray-200 shrink-0">
-          {/* Center section: file name */}
-          <div className="flex items-center gap-2 min-w-0">
-            <span
-              className="text-sm text-gray-600 truncate max-w-[200px]"
-              title={file.name}
-            >
-              {file.name}
-            </span>
-          </div>
-
-          {/* Right section: language, TOC, search, close */}
-          <div className="flex items-center gap-1 shrink-0">
-            {/* Language selector button */}
-            <button
-              onClick={() => {
-                setPendingLang(null);
-                setShowLangModal(true);
-              }}
-              title="학습 언어 선택"
-              className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium transition-colors ${
-                language
-                  ? "text-gray-600 hover:bg-gray-100"
-                  : "text-amber-600 bg-amber-50 hover:bg-amber-100 border border-amber-200"
-              }`}
-            >
-              {language ? (
-                <>
-                  <span className="text-sm leading-none">
-                    {TTS_LANGUAGES.find((l) => l.code === language)?.flag}
-                  </span>
-                  <span>
-                    {TTS_LANGUAGES.find((l) => l.code === language)?.label}
-                  </span>
-                </>
-              ) : (
-                <>
-                  <svg
-                    className="w-3.5 h-3.5"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                  >
-                    <circle cx="12" cy="12" r="10" />
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      d="M2 12h20M12 2a15.3 15.3 0 010 20M12 2a15.3 15.3 0 000 20"
-                    />
-                  </svg>
-                  <span>언어 선택</span>
-                </>
-              )}
-            </button>
-            {/* TOC button */}
-            {toc.length > 0 && (
-              <div
-                className="relative"
-                onMouseEnter={() => {
-                  if (tocLeaveTimerRef.current)
-                    clearTimeout(tocLeaveTimerRef.current);
-                  setShowToc(true);
-                }}
-                onMouseLeave={() => {
-                  tocLeaveTimerRef.current = setTimeout(
-                    () => setShowToc(false),
-                    150,
-                  );
-                }}
-              >
-                <button
-                  title="목차"
-                  className={`p-1.5 rounded-lg transition-colors ${
-                    showToc
-                      ? "bg-blue-100 text-blue-600"
-                      : "text-gray-400 hover:text-gray-600 hover:bg-gray-100"
-                  }`}
-                >
-                  <svg
-                    className="w-3.5 h-3.5"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      d="M4 6h16M4 10h16M4 14h10M4 18h10"
-                    />
-                  </svg>
-                </button>
-
-                {showToc && (
-                  <div className="absolute right-0 top-full mt-1 z-50 bg-white border border-gray-200 rounded-xl shadow-lg w-64 max-h-80 overflow-y-auto">
-                    {tocIsGenerated && (
-                      <div className="px-3 py-1.5 border-b border-gray-100 flex items-center gap-1.5">
-                        <span className="text-[10px] text-amber-600 font-medium">
-                          자동 생성됨
-                        </span>
-                        <span className="text-[10px] text-gray-400">
-                          · 폰트 크기 기반
-                        </span>
-                      </div>
-                    )}
-                    <div className="p-1">
-                      {toc.map((item, i) => (
-                        <button
-                          key={i}
-                          onClick={() => {
-                            scrollToPage(item.page);
-                            setShowToc(false);
-                          }}
-                          style={{ paddingLeft: `${8 + item.level * 12}px` }}
-                          className="w-full text-left py-1.5 pr-2.5 rounded-lg hover:bg-blue-50 transition-colors flex items-center justify-between gap-2 group"
-                        >
-                          <span className="text-xs text-gray-700 group-hover:text-gray-900 truncate">
-                            {item.title}
-                          </span>
-                          <span className="text-xs text-gray-400 shrink-0 tabular-nums">
-                            {item.page}
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Search toggle button */}
-            <div
-              className="relative"
-              onMouseEnter={() => {
-                if (searchLeaveTimerRef.current)
-                  clearTimeout(searchLeaveTimerRef.current);
-                setShowSearch(true);
-              }}
-              onMouseLeave={() => {
-                searchLeaveTimerRef.current = setTimeout(
-                  () => setShowSearch(false),
-                  150,
-                );
-              }}
-            >
-              <button
-                title="내용 찾기 (⌘F)"
-                className={`p-1.5 rounded-lg transition-colors ${
-                  showSearch
-                    ? "bg-blue-100 text-blue-600"
-                    : "text-gray-400 hover:text-gray-600 hover:bg-gray-100"
-                }`}
-              >
-                <svg
-                  className="w-3.5 h-3.5"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                  strokeWidth={2}
-                >
-                  <circle cx="11" cy="11" r="8" />
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M21 21l-4.35-4.35"
-                  />
-                </svg>
-              </button>
-
-              {showSearch && (
-                <div className="absolute right-0 top-full mt-1 z-50 bg-white border border-gray-200 rounded-xl shadow-lg w-80 p-3">
-                  {/* Input row */}
-                  <div className="flex items-center gap-2 mb-2">
-                    <div className="relative flex-1">
-                      <svg
-                        className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
-                        strokeWidth={2}
-                      >
-                        <circle cx="11" cy="11" r="8" />
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          d="M21 21l-4.35-4.35"
-                        />
-                      </svg>
-                      <input
-                        ref={searchInputRef}
-                        value={searchQuery}
-                        onChange={(e) => setSearchQuery(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Escape") {
-                            setShowSearch(false);
-                            setSearchQuery("");
-                            setSearchResults([]);
-                          }
-                        }}
-                        placeholder="페이지 내용 검색..."
-                        className="w-full pl-8 pr-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                      />
-                    </div>
-                    <button
-                      onClick={() => {
-                        setShowSearch(false);
-                        setSearchQuery("");
-                        setSearchResults([]);
-                      }}
-                      className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors shrink-0"
-                      title="닫기 (Esc)"
-                    >
-                      <svg
-                        className="w-3.5 h-3.5"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
-                        strokeWidth={2}
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          d="M6 18L18 6M6 6l12 12"
-                        />
-                      </svg>
-                    </button>
-                  </div>
-
-                  {/* Results */}
-                  {isSearching && (
-                    <div className="flex items-center gap-2 text-xs text-gray-400 py-1">
-                      <span className="w-3 h-3 border border-gray-300 border-t-blue-500 rounded-full animate-spin shrink-0" />
-                      전체 페이지 검색 중...
-                    </div>
-                  )}
-
-                  {!isSearching && searchQuery.trim() && (
-                    <div className="max-h-44 overflow-y-auto">
-                      {searchResults.length === 0 ? (
-                        <p className="text-xs text-gray-400 py-1">결과 없음</p>
-                      ) : (
-                        <>
-                          <p className="text-xs text-gray-400 mb-1.5">
-                            {searchResults.length}개 페이지 발견
-                          </p>
-                          <div className="space-y-1">
-                            {searchResults.map((r) => (
-                              <button
-                                key={r.page}
-                                onClick={() => {
-                                  scrollToPage(r.page);
-                                  setShowSearch(false);
-                                  setSearchQuery("");
-                                  setSearchResults([]);
-                                }}
-                                className="w-full text-left px-2.5 py-2 rounded-lg hover:bg-blue-50 transition-colors flex items-start gap-2.5 group"
-                              >
-                                <span className="text-xs font-semibold text-blue-600 shrink-0 mt-0.5 tabular-nums">
-                                  p.{r.page}
-                                </span>
-                                <span className="text-xs text-gray-600 leading-relaxed group-hover:text-gray-900 line-clamp-2">
-                                  <ExcerptHighlight
-                                    text={r.excerpt}
-                                    query={searchQuery.trim()}
-                                  />
-                                </span>
-                              </button>
-                            ))}
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            <button
-              onClick={closeFile}
-              className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
-              title="닫기"
-            >
-              <svg
-                className="w-3.5 h-3.5"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M6 18L18 6M6 6l12 12"
-                />
-              </svg>
-            </button>
-          </div>
-        </div>
 
         {/* Loading overlay — shown until page restore is complete */}
         {!pdfReady && (
@@ -1571,34 +1229,14 @@ function PdfViewerInner(
         {/* Page area */}
         <div className="pdf-scroll-area flex-1 overflow-y-auto flex flex-col items-center px-4 py-4 pb-16">
           <Document
-            key={file.name}
+            key={`${file.name}-${fileGeneration}`}
             file={file}
             options={DOCUMENT_OPTIONS}
             onLoadSuccess={async (pdf) => {
               setNumPages(pdf.numPages);
               pdfDocRef.current = pdf;
-              // No serverId → no page restore needed, show immediately
-              if (!serverId) setPdfReady(true);
-              setToc([]);
-              setTocIsGenerated(false);
-              try {
-                const outline = await pdf.getOutline();
-                if (outline?.length) {
-                  const resolved = await flattenOutline(pdf, outline, 0);
-                  setToc(resolved);
-                  setTocIsGenerated(false);
-                } else {
-                  // No built-in outline → auto-generate from font-size heuristic
-                  const generated = await generateTocFromContent(
-                    pdf,
-                    pdf.numPages,
-                  );
-                  setToc(generated);
-                  setTocIsGenerated(true);
-                }
-              } catch {
-                /* PDF has no outline */
-              }
+              // No pdfServerId → no page restore needed, show immediately
+              if (!pdfServerId) setPdfReady(true);
             }}
             loading={
               <div className="flex items-center gap-2 text-gray-400 text-sm mt-16">
@@ -1650,6 +1288,7 @@ function PdfViewerInner(
                       pageNumber={n}
                       renderTextLayer={true}
                       renderAnnotationLayer={false}
+                      customTextRenderer={searchQuery.trim() ? searchHighlightRenderer : undefined}
                       className="shadow-md"
                       width={pageWidth}
                       onRenderSuccess={(page) => {
@@ -1763,8 +1402,8 @@ function PdfViewerInner(
                                 className="text-white/80 hover:text-white transition-colors"
                                 title="삭제"
                                 onClick={async () => {
-                                  if (!serverId) return;
-                                  await deleteAnnotation(serverId, ann.id);
+                                  if (!pdfServerId) return;
+                                  await deleteAnnotation(pdfServerId, ann.id);
                                   setAnnotations((prev) =>
                                     prev.filter((a) => a.id !== ann.id),
                                   );
@@ -1799,9 +1438,9 @@ function PdfViewerInner(
                                 className="text-xs font-semibold transition-opacity hover:opacity-80"
                                 style={{ color: STICKY_COLORS[stickyColor]?.header ?? "#f59e0b" }}
                                 onClick={async () => {
-                                  if (!serverId) return;
+                                  if (!pdfServerId) return;
                                   const updated = await updateAnnotation(
-                                    serverId,
+                                    pdfServerId,
                                     ann.id,
                                     stickyText,
                                     stickyColor,
@@ -1893,9 +1532,9 @@ function PdfViewerInner(
                             style={{ color: STICKY_COLORS[stickyColor]?.header ?? "#f59e0b" }}
                             disabled={!stickyText.trim()}
                             onClick={async () => {
-                              if (!serverId || !stickyText.trim()) return;
+                              if (!pdfServerId || !stickyText.trim()) return;
                               const created = await createAnnotation(
-                                serverId,
+                                pdfServerId,
                                 pageNumber,
                                 pendingSticky.xPct,
                                 pendingSticky.yPct,
@@ -1920,71 +1559,167 @@ function PdfViewerInner(
           </Document>
         </div>
 
+        {/* Spotlight-style search overlay — draggable */}
+        {showSearch && (
+          <div
+            ref={spotlightRef}
+            className="absolute z-20 w-[min(420px,90%)]"
+            style={{ left: `${spotlightPos.x}%`, top: `${spotlightPos.y}%`, transform: "translateX(-50%)" }}
+            onMouseLeave={() => { if (!spotlightDrag.current) { setShowSearch(false); setSearchQuery(""); setSearchResults([]); } }}
+          >
+            <div className="bg-white/95 backdrop-blur-md border border-gray-200 rounded-2xl shadow-2xl overflow-hidden">
+              {/* Drag handle bar */}
+              {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions */}
+              <div
+                className="flex items-center justify-center py-1.5 cursor-move select-none"
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  spotlightDrag.current = { startX: e.clientX, startY: e.clientY, origX: spotlightPos.x, origY: spotlightPos.y };
+                }}
+              >
+                <div className="w-8 h-1 rounded-full bg-gray-300" />
+              </div>
+              {/* Search input */}
+              <div className="flex items-center gap-3 px-4 pb-3">
+                <svg className="w-5 h-5 text-gray-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <circle cx="11" cy="11" r="8" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35" />
+                </svg>
+                <input
+                  ref={searchInputRef}
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Escape") { setShowSearch(false); setSearchQuery(""); setSearchResults([]); } }}
+                  placeholder="페이지 내용 검색..."
+                  className="flex-1 text-sm bg-transparent outline-none placeholder-gray-400 text-gray-900"
+                />
+                {searchQuery && (
+                  <button onClick={() => { setSearchQuery(""); setSearchResults([]); }} className="text-gray-400 hover:text-gray-600">
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+              {/* Results */}
+              {(isSearching || (searchQuery.trim() && searchResults.length >= 0)) && (
+                <div className="border-t border-gray-100">
+                  {isSearching && (
+                    <div className="flex items-center gap-2 text-xs text-gray-400 px-4 py-3">
+                      <span className="w-3 h-3 border border-gray-300 border-t-blue-500 rounded-full animate-spin shrink-0" />
+                      전체 페이지 검색 중...
+                    </div>
+                  )}
+                  {!isSearching && searchQuery.trim() && (
+                    <div className="max-h-64 overflow-y-auto py-1">
+                      {searchResults.length === 0 ? (
+                        <p className="text-xs text-gray-400 px-4 py-3">결과 없음</p>
+                      ) : (
+                        <>
+                          <p className="text-[10px] text-gray-400 px-4 pt-1 pb-1">{searchResults.length}개 페이지 발견</p>
+                          {searchResults.map((r) => (
+                            <button
+                              key={r.page}
+                              onClick={() => { scrollToPage(r.page); }}
+                              className="w-full text-left px-4 py-2.5 hover:bg-blue-50 transition-colors flex items-start gap-3 group"
+                            >
+                              <span className="text-xs font-semibold text-blue-600 shrink-0 mt-0.5 tabular-nums bg-blue-50 px-1.5 py-0.5 rounded">
+                                p.{r.page}
+                              </span>
+                              <span className="text-xs text-gray-600 leading-relaxed group-hover:text-gray-900 line-clamp-2">
+                                <ExcerptHighlight text={r.excerpt} query={searchQuery.trim()} />
+                              </span>
+                            </button>
+                          ))}
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Floating bottom toolbar */}
         {file && numPages > 0 && (
           <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-0.5 px-1 py-1 bg-white/90 backdrop-blur-sm border border-gray-200 rounded-lg shadow-lg text-sm text-gray-600 min-w-max">
+            {/* Language selector */}
+            <button
+              onClick={() => { setPendingLang(null); setShowLangModal(true); }}
+              title="학습 언어 선택"
+              className={`flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium transition-colors ${
+                language
+                  ? "hover:bg-gray-100"
+                  : "text-amber-600 bg-amber-50 hover:bg-amber-100"
+              }`}
+            >
+              {language ? (
+                <>
+                  <span className="text-sm leading-none">{TTS_LANGUAGES.find((l) => l.code === language)?.flag}</span>
+                  <span>{TTS_LANGUAGES.find((l) => l.code === language)?.label}</span>
+                </>
+              ) : (
+                <>
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                    <circle cx="12" cy="12" r="10" />
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M2 12h20M12 2a15.3 15.3 0 010 20M12 2a15.3 15.3 0 000 20" />
+                  </svg>
+                  <span>언어</span>
+                </>
+              )}
+            </button>
+            {/* Search toggle */}
+            <button
+              onClick={() => { setShowSearch((v) => !v); }}
+              title="내용 찾기 (⌘F)"
+              className={`p-1.5 rounded-md transition-colors ${showSearch ? "bg-blue-100 text-blue-600" : "hover:bg-gray-100"}`}
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <circle cx="11" cy="11" r="8" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35" />
+              </svg>
+            </button>
+            <div className="w-px h-4 bg-gray-200 mx-0.5" />
             {/* Zoom out */}
             <button
-              onClick={() =>
-                setScale((s) => Math.max(0.5, parseFloat((s - 0.1).toFixed(1))))
-              }
+              onClick={() => setScale((s) => Math.max(0.5, parseFloat((s - 0.1).toFixed(1))))}
               title="축소"
               className="p-1.5 rounded-md hover:bg-gray-100 transition-colors"
             >
-              <svg
-                className="w-4 h-4"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M20 12H4"
-                />
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M20 12H4" />
               </svg>
             </button>
-            {/* Fit */}
+            {/* Zoom percentage */}
             <button
               onClick={() => setScale(1.0)}
-              title="맞춤"
-              className="p-1.5 rounded-md hover:bg-gray-100 transition-colors"
+              title="맞춤 (1x)"
+              className="px-1 py-0.5 rounded-md hover:bg-gray-100 transition-colors text-xs tabular-nums min-w-[36px] text-center"
             >
-              <svg
-                className="w-4 h-4"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3"
-                />
-              </svg>
+              {Math.round(scale * 100)}%
             </button>
             {/* Zoom in */}
             <button
-              onClick={() =>
-                setScale((s) => Math.min(2.0, parseFloat((s + 0.1).toFixed(1))))
-              }
+              onClick={() => setScale((s) => Math.min(2.0, parseFloat((s + 0.1).toFixed(1))))}
               title="확대"
               className="p-1.5 rounded-md hover:bg-gray-100 transition-colors"
             >
-              <svg
-                className="w-4 h-4"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M12 5v14M5 12h14"
-                />
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M5 12h14" />
+              </svg>
+            </button>
+            {/* Fit to width */}
+            <button
+              onClick={() => {
+                const w = containerRef.current?.clientWidth ?? 600;
+                setScale(Math.max(0.5, Math.min(2.0, parseFloat(((w - 32) / 760).toFixed(2)))));
+              }}
+              title="너비 맞춤"
+              className="p-1.5 rounded-md hover:bg-gray-100 transition-colors"
+            >
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3" />
               </svg>
             </button>
             <div className="w-px h-4 bg-gray-200 mx-0.5" />
@@ -1995,18 +1730,8 @@ function PdfViewerInner(
               title="이전 페이지"
               className="p-1.5 rounded-md hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             >
-              <svg
-                className="w-4 h-4"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M15 19l-7-7 7-7"
-                />
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
               </svg>
             </button>
             {/* Page indicator */}
@@ -2052,70 +1777,21 @@ function PdfViewerInner(
               title="다음 페이지"
               className="p-1.5 rounded-md hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             >
-              <svg
-                className="w-4 h-4"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M9 5l7 7-7 7"
-                />
-              </svg>
-            </button>
-            <div className="w-px h-4 bg-gray-200 mx-0.5" />
-            {/* Search */}
-            <button
-              onClick={() => {
-                if (searchLeaveTimerRef.current)
-                  clearTimeout(searchLeaveTimerRef.current);
-                setShowSearch((v) => !v);
-              }}
-              title="검색 (⌘F)"
-              className={`p-1.5 rounded-md transition-colors ${showSearch ? "bg-blue-100 text-blue-600" : "hover:bg-gray-100"}`}
-            >
-              <svg
-                className="w-4 h-4"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <circle cx="11" cy="11" r="8" />
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M21 21l-4.35-4.35"
-                />
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
               </svg>
             </button>
             {/* Note mode toggle — only when PDF is server-uploaded */}
-            {serverId && (
+            {pdfServerId && (
               <>
                 <div className="w-px h-4 bg-gray-200 mx-0.5" />
                 <button
-                  onClick={() => {
-                    setIsStickyMode((v) => !v);
-                    setPendingSticky(null);
-                  }}
+                  onClick={() => { setIsStickyMode((v) => !v); setPendingSticky(null); }}
                   title={isStickyMode ? "스티키 메모 끄기" : "스티키 메모 추가"}
                   className={`p-1.5 rounded-md transition-colors ${isStickyMode ? "bg-yellow-100 text-yellow-700" : "hover:bg-gray-100"}`}
                 >
-                  <svg
-                    className="w-4 h-4"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
-                    />
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
                   </svg>
                 </button>
               </>
@@ -2420,27 +2096,32 @@ function PdfViewerInner(
                 <h2 className="text-sm font-semibold text-gray-800">
                   학습 언어 선택
                 </h2>
-                <button
-                  onClick={() => setShowLangModal(false)}
-                  className="p-0.5 rounded-md text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors -mt-0.5 -mr-0.5"
-                >
-                  <svg
-                    className="w-4 h-4"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth={2}
+                {/* Only show close button if a language is already set */}
+                {language && (
+                  <button
+                    onClick={() => setShowLangModal(false)}
+                    className="p-0.5 rounded-md text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors -mt-0.5 -mr-0.5"
                   >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      d="M6 18L18 6M6 6l12 12"
-                    />
-                  </svg>
-                </button>
+                    <svg
+                      className="w-4 h-4"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth={2}
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        d="M6 18L18 6M6 6l12 12"
+                      />
+                    </svg>
+                  </button>
+                )}
               </div>
               <p className="text-xs text-gray-400 mb-4">
-                선택한 언어로 발음(TTS)이 재생됩니다.
+                {language
+                  ? "선택한 언어로 발음(TTS)이 재생됩니다."
+                  : "이 PDF의 학습 언어를 선택해주세요. TTS 발음과 번역에 사용됩니다."}
               </p>
               <div className="grid grid-cols-2 gap-2">
                 {TTS_LANGUAGES.map((lang) => {
@@ -2473,8 +2154,8 @@ function PdfViewerInner(
                   const lang = pendingLang ?? language;
                   if (lang) {
                     onLanguageChange(lang);
-                    if (serverId)
-                      savePdfLanguage(serverId, lang).catch(() => {});
+                    if (pdfServerId)
+                      savePdfLanguage(pdfServerId, lang).catch(() => {});
                   }
                   setPendingLang(null);
                   setShowLangModal(false);

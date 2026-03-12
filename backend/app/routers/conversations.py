@@ -1,8 +1,9 @@
 """
 Conversations router.
 
-GET /api/conversations                     — List conversations for current user
-GET /api/conversations/{id}/messages       — Get messages in a conversation
+GET    /api/conversations                     — List conversations for current user
+GET    /api/conversations/{id}/messages       — Get messages in a conversation
+DELETE /api/conversations/{id}/messages       — Delete all messages in a conversation (reset chat)
 """
 
 import logging
@@ -50,3 +51,16 @@ async def get_messages(
         "conversation_id": str(conversation_id),
         "messages": messages,
     }
+
+
+@router.delete("/conversations/{conversation_id}/messages")
+async def reset_chat(
+    conversation_id: UUID,
+    user_id: UUID = Depends(get_current_user),
+):
+    """Delete all messages in a conversation (reset chat). The conversation itself is kept."""
+    conv_repo = ConversationRepository()
+    deleted = await conv_repo.delete_messages(user_id, conversation_id)
+    if deleted == -1:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return {"ok": True, "deleted": deleted}

@@ -4,6 +4,70 @@
 > **Scope**: Full stack (backend + frontend + infra)
 > **Live**: https://lingua-rag.vercel.app
 
+## Session: 2026-03-12 23:16
+
+> **Context**: PDF 관리 UX 버그 수정 — 인덱싱 상태 폴링, 중복 key, 삭제 cascade, 검색 하이라이트, 대용량 업로드
+
+### Done
+- fix(frontend): **폴링 재시작 버그** — `useRef` + `[]` deps 패턴을 derived `pollingNeeded` state로 교체, 업로드 후 인덱싱 상태가 자동 갱신
+- fix(frontend): **React duplicate key 에러** — 사이드바 + 모달 `key={meta.name}` → `key={meta.chatId ?? meta.name}`
+- fix(frontend): **동일 파일명 PDF 다중 선택 표시** — `activePdfName` 비교를 `activeChatId` 기반으로 전환 (사이드바 하이라이트)
+- fix(frontend): **모달 업로드 후 사이드바 미반영** — 모달 업로드 경로에 `setPdfLibrary()` 즉시 호출 추가
+- fix(frontend): **인덱싱 중 새 PDF 추가 시 목록 미반영** — 폴링 콜백에서 `getLibraryMeta()` re-read로 새 엔트리 반영
+- fix(frontend): **새로고침 시 랜딩 페이지 깜빡임** — `initialized` false일 때 로딩 스피너 표시
+- fix(frontend): **활성 PDF 삭제 시 첫 번째 PDF 자동 선택** — `handleDeletePdf`에서 `handleSelectPdf(sorted[0])` 호출
+- fix(frontend): **대용량 PDF 업로드 실패 (10MB 제한)** — middleware matcher에서 `api/` 경로 제외
+- fix(backend): **PDF 삭제 시 연관 데이터 미삭제** — `pdf_repo.delete()`에서 트랜잭션 내 `document_chunks`, `summaries`, `notes`, `conversations` 일괄 삭제
+- feat(backend): **임베딩 API 재시도** — `embed_batch`에 exponential backoff (최대 3회, 500 에러)
+- feat(backend): **임베딩 배치 실패 스킵** — 실패 배치만 제외하고 나머지 청크 정상 인덱싱
+- feat(frontend): **PDF 검색 결과 클릭 시 모달 유지** — 페이지 이동만 수행, mouseLeave로 닫힘
+- feat(frontend): **PDF 검색어 페이지 내 하이라이트** — `customTextRenderer`로 검색어 노란색 mark 표시
+
+### Issues
+- 특정 PDF (`_OceanofPDF.com_Hands-On_Large_Language_Models_-_Jay_Alammar.pdf`) 임베딩 시 OpenAI 500 에러 반복 발생 — 재시도 + 배치 스킵으로 부분 인덱싱 가능하나, 근본 원인 (깨진 텍스트? 과대 토큰?) 미확인
+
+### Next
+- [ ] OpenAI 500 반복 실패 PDF 원인 조사 — 실패 배치의 텍스트 내용 로깅하여 문제 청크 특정
+- [ ] `activePdfName` → `activeChatId` 전면 리팩터링 — 현재 사이드바만 적용, `visitedPdfs`/`pdfIdMap` 등 나머지도 chatId 기반 전환
+- [ ] Phase 4: user acquisition (10-20 users) — Reddit r/languagelearning, Discord communities
+- [ ] Portfolio documentation: architecture diagram, ADR records, quantitative results
+
+---
+
+## Session: 2026-03-12 23:13
+
+> **Context**: Phase 4-5 completion — Eval rebuild, CI/CD, Hybrid Search, Observability, TTS auto-detect, embedding model comparison
+
+### Done
+- feat(eval): **universal LLM-as-Judge evaluator** (`scripts/evaluate.py`) — 8 rules (5 content + 3 format), RAG keyword recall metric, 12 multi-language test questions (DE×5, EN×2, JA×2, ZH×1, FR×1, ES×1), `--language` filter, `--concurrency` flag
+- feat(eval): **test_questions.json rewritten** — multi-language test set with 4 RAG context questions and `expected_in_response` ground truth keywords
+- ci: **GitHub Actions CI/CD** — `ci.yml` (PR/push: backend lint + test + frontend lint + typecheck + build), `eval.yml` (workflow_dispatch: manual LLM eval + artifact upload)
+- chore: **pyproject.toml** — ruff config (line-length 120, E/F/W/I rules, ignore E702); 9 backend files reformatted
+- feat(rag): **Hybrid Search** (`repositories.py`) — pgvector cosine + PostgreSQL tsvector with Reciprocal Rank Fusion (RRF, k=60); single SQL with 3 CTEs; graceful fallback to vector-only
+- feat(db): **004_hybrid_search.sql** — `tsv tsvector` column + GIN index on `document_chunks`
+- feat(rag): **indexing_service.py** — `to_tsvector('simple', content)` during indexing for hybrid search support
+- feat(api): **GET /api/stats** (`stats.py`) — token usage, RAG hit rate, cost estimates (Claude + OpenAI embedding), daily usage (14d), per-PDF breakdown (top 10)
+- feat(api): **stats router registered** in `main.py`
+- feat(indexing): **language auto-detect** (`language_detect.py`) — Unicode script analysis (hiragana/katakana/CJK) + function-word frequency matching (6 Latin languages); auto-sets `pdf_files.language` during indexing if not already set by user
+- docs(embedding): **embedding model comparison** — `docs/embedding-comparison.md` (spec/cost/infra/multilingual analysis with decision matrix) + `scripts/compare_embeddings.py` (Hit@K, MRR, cosine separation benchmark via OpenAI + HuggingFace APIs)
+- docs: **todo.md** — Phase 4 + Phase 5 all items marked complete
+
+### Decisions
+- Hybrid Search tokenizer: `'simple'` (language-agnostic whitespace tokenizer) over language-specific configs — service handles any language PDF
+- RRF implementation: single SQL with CTEs + FULL OUTER JOIN (no application-level merging); candidate pool = `limit * 5` for better fusion quality
+- Embedding model: **keep `text-embedding-3-small`** — cost <$1/mo vs $50+/mo for E5 self-host; Hybrid Search already compensates multilingual gap; migration cost (DB schema change + full re-index) not justified at current scale
+- Language detection: pure stdlib (no `langdetect`/`fasttext` dependency) — simpler deployment, sufficient accuracy for PDF textbooks with dominant single-language content
+- Stats API cost model: Claude output $15/M tokens + OpenAI embedding $0.02/M × 750 tokens/chunk average
+
+### Next
+- [ ] Phase 4: user acquisition (10-20 users) — Reddit r/languagelearning, Discord communities
+- [ ] Run eval benchmark (`eval.yml` workflow_dispatch) and record actual scores for portfolio
+- [ ] Commit pending frontend changes (guest mode, login modal, etc.) — currently excluded from Phase 5 commits
+- [ ] Portfolio documentation: architecture diagram, ADR records, quantitative results
+- [ ] Update `product-intro.md` with Hybrid Search and new Phase 5 features
+
+---
+
 ## Session: 2026-03-11 23:33
 
 > **Context**: Phase 1 pivot — remove all German-specific code, convert unit-based architecture to PDF-based universal language tutor
@@ -42,10 +106,10 @@
 - POST /api/chat 500 error resolved after running the NOT NULL fix + server restart
 
 ### Next
-- [ ] Phase 2: `POST /api/pdfs/{id}/index` endpoint — PDF upload → auto text extraction → chunking → embedding → `document_chunks` storage
-- [ ] Phase 2: `pdf_files.index_status` column (`pending → indexing → ready → failed`)
-- [ ] Phase 2: Indexing status UI in PDF sidebar
-- [ ] Phase 2: Chunking strategy (page-based, paragraph split for long pages)
+- [x] Phase 2: `POST /api/pdfs/{id}/index` endpoint — PDF upload → auto text extraction → chunking → embedding → `document_chunks` storage (completed in prior session)
+- [x] Phase 2: `pdf_files.index_status` column (`pending → indexing → ready → failed`) (completed in prior session)
+- [x] Phase 2: Indexing status UI in PDF sidebar (completed in prior session)
+- [x] Phase 2: Chunking strategy (page-based, paragraph split for long pages) (completed in prior session)
 - [x] Remove debug `console.log` from `PdfViewer.tsx` — 제거 완료
 - [x] Hover popup edge positioning — `popup.y < 80` fallback 적용 완료
 

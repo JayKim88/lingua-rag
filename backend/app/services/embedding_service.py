@@ -7,10 +7,11 @@ Used at:
   - Query time: convert user message → vector (routers/chat.py)
 """
 
+import asyncio
 import logging
 from functools import lru_cache
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, APIStatusError
 
 from app.core.config import settings
 
@@ -34,14 +35,22 @@ class EmbeddingService:
         )
         return response.data[0].embedding
 
-    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+    async def embed_batch(self, texts: list[str], max_retries: int = 3) -> list[list[float]]:
         """Convert multiple texts to embedding vectors in a single API call."""
-        response = await self._client.embeddings.create(
-            input=texts,
-            model=MODEL,
-        )
-        # API returns embeddings in the same order as input
-        return [item.embedding for item in sorted(response.data, key=lambda x: x.index)]
+        for attempt in range(max_retries):
+            try:
+                response = await self._client.embeddings.create(
+                    input=texts,
+                    model=MODEL,
+                )
+                return [item.embedding for item in sorted(response.data, key=lambda x: x.index)]
+            except APIStatusError as e:
+                if e.status_code >= 500 and attempt < max_retries - 1:
+                    wait = 2 ** attempt
+                    logger.warning("OpenAI 500 error (attempt %d/%d), retrying in %ds", attempt + 1, max_retries, wait)
+                    await asyncio.sleep(wait)
+                else:
+                    raise
 
 
 @lru_cache(maxsize=1)

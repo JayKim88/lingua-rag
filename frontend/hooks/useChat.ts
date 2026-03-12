@@ -5,17 +5,26 @@ import { Message } from "@/lib/types";
 
 interface UseChatOptions {
   pdfId: string;
+  /** Server-side PDF ID for RAG (may differ from pdfId for guests). Updated via ref — does NOT reset chat. */
+  serverPdfId?: string | null;
   getPageText?: () => Promise<string | null>;
   getPageNumber?: () => number | null;
+  /** When true, uses guest chat endpoint (no auth, no persistence). */
+  isGuest?: boolean;
 }
 
 const PAGE_TRIGGER = /이\s*페이지/;
+const GUEST_MESSAGE_LIMIT = 20;
 
-export function useChat({ pdfId, getPageText, getPageNumber }: UseChatOptions) {
+export function useChat({ pdfId, serverPdfId, getPageText, getPageNumber, isGuest }: UseChatOptions) {
+  // Ref for serverPdfId so it can change without triggering resets
+  const serverPdfIdRef = useRef(serverPdfId);
+  serverPdfIdRef.current = serverPdfId;
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [queueSize, setQueueSize] = useState(0);
+  const [guestLimitReached, setGuestLimitReached] = useState(false);
 
   const queue = useRef<string[]>([]);
   const messagesRef = useRef<Message[]>([]);
@@ -47,45 +56,50 @@ export function useChat({ pdfId, getPageText, getPageNumber }: UseChatOptions) {
 
     let cancelled = false;
 
-    (async () => {
-      try {
-        const convsRes = await fetch("/api/conversations");
-        if (!convsRes.ok || cancelled) return;
+    if (isGuest) {
+      // Guest mode: no server-side history
+      setIsLoadingHistory(false);
+    } else {
+      (async () => {
+        try {
+          const convsRes = await fetch("/api/conversations");
+          if (!convsRes.ok || cancelled) return;
 
-        const { conversations } = await convsRes.json();
-        const conv = (conversations ?? []).find(
-          (c: { pdf_id: string }) => c.pdf_id === pdfId
-        );
-        if (!conv || cancelled) return;
-
-        const msgsRes = await fetch(`/api/conversations/${conv.id}/messages`);
-        if (!msgsRes.ok || cancelled) return;
-
-        const { messages: dbMessages } = await msgsRes.json();
-        if (!cancelled && dbMessages?.length) {
-          setMessages(
-            dbMessages.map(
-              (m: { id: string; role: "user" | "assistant"; content: string; feedback?: "up" | "down" | null; created_at?: string }) => ({
-                id: m.id,
-                backendId: m.id, // DB messages already have the backend UUID as id
-                role: m.role,
-                content: m.content,
-                isStreaming: false,
-                feedback: m.feedback ?? null,
-                createdAt: m.created_at,
-              })
-            )
+          const { conversations } = await convsRes.json();
+          const conv = (conversations ?? []).find(
+            (c: { pdf_id: string }) => c.pdf_id === pdfId
           );
+          if (!conv || cancelled) return;
+
+          const msgsRes = await fetch(`/api/conversations/${conv.id}/messages`);
+          if (!msgsRes.ok || cancelled) return;
+
+          const { messages: dbMessages } = await msgsRes.json();
+          if (!cancelled && dbMessages?.length) {
+            setMessages(
+              dbMessages.map(
+                (m: { id: string; role: "user" | "assistant"; content: string; feedback?: "up" | "down" | null; created_at?: string }) => ({
+                  id: m.id,
+                  backendId: m.id,
+                  role: m.role,
+                  content: m.content,
+                  isStreaming: false,
+                  feedback: m.feedback ?? null,
+                  createdAt: m.created_at,
+                })
+              )
+            );
+          }
+        } finally {
+          if (!cancelled) setIsLoadingHistory(false);
         }
-      } finally {
-        if (!cancelled) setIsLoadingHistory(false);
-      }
-    })();
+      })();
+    }
 
     return () => {
       cancelled = true;
     };
-  }, [pdfId]);
+  }, [pdfId, isGuest]);
 
   const processMessage = useCallback(
     async (content: string) => {
@@ -124,25 +138,43 @@ export function useChat({ pdfId, getPageText, getPageNumber }: UseChatOptions) {
       const controller = new AbortController();
       abortControllerRef.current = controller;
 
-      // Detect "이 페이지" trigger → extract page text client-side
+      // Extract page text for context
       let pageText: string | null = null;
-      if (PAGE_TRIGGER.test(content) && getPageText) {
-        try {
-          pageText = await getPageText();
-        } catch {
-          // Silently fail — send message without page context
+      if (getPageText) {
+        // Guest: always send page text for context (no server-side RAG)
+        // Authenticated: only on "이 페이지" trigger
+        if (isGuest || PAGE_TRIGGER.test(content)) {
+          try {
+            pageText = await getPageText();
+          } catch {
+            // Silently fail — send message without page context
+          }
         }
       }
 
       try {
-        const response = await fetch("/api/chat", {
+        const chatEndpoint = isGuest ? "/api/guest/chat" : "/api/chat";
+        // For guest mode, include message history in request (no server persistence)
+        const guestHistory = isGuest
+          ? messagesRef.current
+              .filter((m) => !m.isStreaming && m.content)
+              .slice(-10)
+              .map((m) => ({ role: m.role, content: m.content }))
+          : undefined;
+
+        const response = await fetch(chatEndpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             message: content,
-            pdf_id: pdfId,
+            // Guest: only send pdf_id when server upload is done (serverPdfId is a UUID).
+            // Authenticated: pdfId is always a valid server UUID.
+            ...(isGuest
+              ? (serverPdfIdRef.current ? { pdf_id: serverPdfIdRef.current } : {})
+              : { pdf_id: pdfId }),
             ...(pageText ? { page_text: pageText } : {}),
             ...(pageText && getPageNumber ? { page_number: getPageNumber() } : {}),
+            ...(guestHistory ? { history: guestHistory } : {}),
           }),
           signal: controller.signal,
         });
@@ -271,11 +303,20 @@ export function useChat({ pdfId, getPageText, getPageNumber }: UseChatOptions) {
         }
       }
     },
-    [pdfId, getPageText, getPageNumber]
+    [pdfId, getPageText, getPageNumber, isGuest]
   );
 
   const sendMessage = useCallback(
     (content: string) => {
+      // Guest message limit check
+      if (isGuest) {
+        const userCount = messagesRef.current.filter((m) => m.role === "user").length;
+        if (userCount >= GUEST_MESSAGE_LIMIT) {
+          setGuestLimitReached(true);
+          return;
+        }
+      }
+
       if (streamingRef.current) {
         queue.current.push(content);
         setQueueSize(queue.current.length);
@@ -283,7 +324,7 @@ export function useChat({ pdfId, getPageText, getPageNumber }: UseChatOptions) {
         processMessage(content);
       }
     },
-    [processMessage]
+    [processMessage, isGuest]
   );
 
   const SUMMARY_PROMPT = `지금까지 나눈 대화를 학습 요약해주세요. 아래 형식을 그대로 사용해주세요:
@@ -370,5 +411,5 @@ export function useChat({ pdfId, getPageText, getPageNumber }: UseChatOptions) {
     [] // messagesRef is a ref, stable across renders
   );
 
-  return { messages, isStreaming, isLoadingHistory, queueSize, sendMessage, sendSummary, cancelMessage, updateFeedback, retryFromMessage };
+  return { messages, isStreaming, isLoadingHistory, queueSize, guestLimitReached, sendMessage, sendSummary, cancelMessage, updateFeedback, retryFromMessage };
 }

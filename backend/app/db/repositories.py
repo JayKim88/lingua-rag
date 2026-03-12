@@ -98,6 +98,23 @@ class ConversationRepository:
             )
         return [_record_to_dict(r) for r in records]
 
+    async def delete_messages(self, user_id: UUID, conversation_id: UUID) -> int:
+        """Delete all messages in a conversation owned by the user. Returns count deleted."""
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            # Verify ownership
+            conv = await conn.fetchrow(
+                "SELECT id FROM conversations WHERE id = $1 AND user_id = $2",
+                conversation_id, user_id,
+            )
+            if not conv:
+                return -1  # not found or not owned
+            result = await conn.execute(
+                "DELETE FROM messages WHERE conversation_id = $1",
+                conversation_id,
+            )
+            return int(result.split()[-1])
+
     async def update_timestamp(self, conversation_id: UUID) -> None:
         """Bump updated_at for a conversation."""
         pool = get_pool()
@@ -511,11 +528,20 @@ class PdfFileRepository:
     async def delete(self, user_id: UUID, pdf_id: str) -> bool:
         pool = get_pool()
         async with pool.acquire() as conn:
-            result = await conn.execute(
-                "DELETE FROM pdf_files WHERE id = $1 AND user_id = $2",
-                pdf_id,
-                user_id,
-            )
+            async with conn.transaction():
+                # Delete related data first (no FK CASCADE on these tables)
+                await conn.execute("DELETE FROM document_chunks WHERE pdf_id = $1", pdf_id)
+                await conn.execute("DELETE FROM summaries WHERE pdf_id = $1 AND user_id = $2", pdf_id, user_id)
+                await conn.execute("DELETE FROM notes WHERE pdf_id = $1 AND user_id = $2", pdf_id, user_id)
+                # Delete messages via conversations (messages CASCADE on conversation delete)
+                await conn.execute(
+                    "DELETE FROM conversations WHERE pdf_id = $1 AND user_id = $2",
+                    pdf_id, user_id,
+                )
+                result = await conn.execute(
+                    "DELETE FROM pdf_files WHERE id = $1 AND user_id = $2",
+                    pdf_id, user_id,
+                )
         return result != "DELETE 0"
 
 

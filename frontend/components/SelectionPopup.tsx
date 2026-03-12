@@ -6,6 +6,7 @@ export interface SelectionPopupProps {
   x: number;
   y: number;
   text: string;
+  language: string | null;
   speak: (text: string) => void;
   onAsk: (payload: { text: string; id: number }) => void;
   onPractice: (text: string) => void;
@@ -20,6 +21,7 @@ export default function SelectionPopup({
   x,
   y,
   text,
+  language,
   speak,
   onAsk,
   onPractice,
@@ -40,7 +42,7 @@ export default function SelectionPopup({
     }
     setIsTranslating(true);
     try {
-      const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=de|ko`;
+      const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${(language || "en-US").slice(0, 2)}|ko`;
       const res = await fetch(url);
       const data = await res.json();
       setTranslation(data?.responseData?.translatedText ?? "번역 실패");
@@ -62,7 +64,6 @@ export default function SelectionPopup({
         top,
       }}
     >
-      ㅁㄴㅇㄹㅁㄴㅇ
       {/* Action buttons row */}
       <div className="flex">
         {/* 소리 */}
@@ -105,7 +106,7 @@ export default function SelectionPopup({
               d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"
             />
           </svg>
-          복사!!!
+          복사
         </button>
         <div className="w-px bg-gray-200" />
         {/* 번역 */}
@@ -118,7 +119,7 @@ export default function SelectionPopup({
               ? "bg-green-50 text-green-700"
               : "text-green-700 hover:bg-green-50 active:bg-green-100 active:scale-95"
           } disabled:opacity-60`}
-          title="독일어 → 한국어 번역"
+          title="번역 (→ 한국어)"
         >
           <svg
             className="w-3.5 h-3.5"

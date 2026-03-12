@@ -17,30 +17,47 @@ import {
 } from "@/lib/summaries";
 import { getNotes, saveNote, deleteNote } from "@/lib/notes";
 import { patchFeedback } from "@/lib/feedback";
+import SubscriptionModal from "./SubscriptionModal";
+import LoginModal from "./LoginModal";
 
 interface ChatPanelProps {
   pdfId: string;
   pdfName: string;
+  /** Server-side PDF ID for RAG (guests: set after upload completes). */
+  serverPdfId?: string | null;
   injectText?: { text: string; id: number };
   getPageText?: () => Promise<string | null>;
   getPageNumber?: () => number | null;
   hasPdfContext?: boolean;
   speak: (text: string) => void;
   onSaveToPage?: (content: string) => void;
+  /** When true, uses guest chat endpoint (no auth required). */
+  isGuest?: boolean;
 }
 
 export default function ChatPanel({
   pdfId,
   pdfName,
+  serverPdfId,
   injectText,
   getPageText,
   getPageNumber,
   hasPdfContext,
   speak,
   onSaveToPage,
+  isGuest,
 }: ChatPanelProps) {
-  const { messages, isStreaming, isLoadingHistory, queueSize, sendMessage, sendSummary, cancelMessage, updateFeedback, retryFromMessage } =
-    useChat({ pdfId, getPageText, getPageNumber });
+  const { messages, isStreaming, isLoadingHistory, queueSize, guestLimitReached, sendMessage, sendSummary, cancelMessage, updateFeedback, retryFromMessage } =
+    useChat({ pdfId, serverPdfId, getPageText, getPageNumber, isGuest });
+
+  // Paywall modal state
+  const [showPaywall, setShowPaywall] = useState(false);
+  const [showLoginModal, setShowLoginModal] = useState(false);
+
+  // Auto-show paywall when guest limit is reached
+  useEffect(() => {
+    if (guestLimitReached) setShowPaywall(true);
+  }, [guestLimitReached]);
 
   // Local inject triggered by "use in input" action button on a message
   const [localInject, setLocalInject] = useState<
@@ -526,6 +543,24 @@ export default function ChatPanel({
         </div>
       )}
 
+      {showPaywall && (
+        <SubscriptionModal
+          onClose={() => setShowPaywall(false)}
+          message="무료 체험 메시지를 모두 사용했습니다. Plus로 업그레이드하면 무제한으로 대화할 수 있어요!"
+          onLogin={() => {
+            setShowPaywall(false);
+            setShowLoginModal(true);
+          }}
+        />
+      )}
+
+      {showLoginModal && (
+        <LoginModal
+          onClose={() => setShowLoginModal(false)}
+          message="로그인하면 무제한 채팅과 더 많은 기능을 이용할 수 있어요"
+        />
+      )}
+
       <InputBar
         onSend={handleSend}
         onCancel={cancelMessage}
@@ -536,6 +571,8 @@ export default function ChatPanel({
         onSummary={sendSummary}
         onMemo={handleOpenMemo}
         showSummary={showNotes}
+        disabled={guestLimitReached}
+        onDisabledClick={() => setShowPaywall(true)}
       />
 
       {/* Pronunciation practice modal */}

@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git status:*)",
+      "Bash(git reset:*)",
+      "Bash(python -c \"from app.routers.guest import router; print\\(''OK''\\)\")",
+      "Bash(python -m ruff check app/main.py app/routers/stats.py)",
+      "Bash(python -m ruff format --check app/main.py app/routers/stats.py)",
+      "Bash(python -c \":*)",
+      "Bash(python -m ruff check app/services/language_detect.py app/services/indexing_service.py)",
+      "Bash(python -m ruff format --check app/services/language_detect.py app/services/indexing_service.py)",
+      "Bash(python -m ruff format app/services/language_detect.py)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''app/routers/guest.py''\\).read\\(\\)\\); print\\(''OK''\\)\")",
+      "Bash(python -m ruff check ../scripts/compare_embeddings.py)",
+      "Bash(python -m ruff format --check ../scripts/compare_embeddings.py)",
+      "Bash(python -m ruff format ../scripts/compare_embeddings.py)",
+      "Bash(grep '\"\"next\"\"' package.json)",
+      "Bash(find /Users/jaykim/Documents/Projects/lingua-rag/backend -name *pdfs* -type f)",
+      "Bash(find /Users/jaykim/Documents/Projects/lingua-rag/frontend/app/api -name *pdfs* -type f)",
+      "Bash(grep -r \"language.*modal\\\\|modal.*language\\\\|showLanguageModal\\\\|pendingLang\\\\|langModal\" /Users/jaykim/Documents/Projects/lingua-rag/frontend/components --include=*.tsx --include=*.ts)",
+      "Read(//Users/jaykim/.claude/skills/wrap-up/**)",
+      "Read(//Users/jaykim/Documents/Projects/claude-ai-engineering/plugins/wrap-up/skills/wrap-up/**)"
+    ],
+    "additionalDirectories": [
+      "/Users/jaykim/Documents/Projects/lingua-rag/frontend/app/api/guest/pdfs/[id]"
+    ]
+  }
+}
