@@ -11,7 +11,7 @@ import asyncio
 import logging
 from functools import lru_cache
 
-from openai import AsyncOpenAI, APIStatusError
+from openai import APIStatusError, AsyncOpenAI
 
 from app.core.config import settings
 
@@ -46,7 +46,7 @@ class EmbeddingService:
                 return [item.embedding for item in sorted(response.data, key=lambda x: x.index)]
             except APIStatusError as e:
                 if e.status_code >= 500 and attempt < max_retries - 1:
-                    wait = 2 ** attempt
+                    wait = 2**attempt
                     logger.warning("OpenAI 500 error (attempt %d/%d), retrying in %ds", attempt + 1, max_retries, wait)
                     await asyncio.sleep(wait)
                 else:

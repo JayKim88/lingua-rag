@@ -148,7 +148,11 @@ async def index_pdf(user_id: UUID, pdf_id: str) -> None:
                 batch_num = i // BATCH_SIZE + 1
                 logger.warning(
                     "Indexing %s: batch %d failed (chunks %d-%d), skipping. Error: %s",
-                    pdf_id, batch_num, i, min(i + BATCH_SIZE, len(all_chunks)) - 1, e,
+                    pdf_id,
+                    batch_num,
+                    i,
+                    min(i + BATCH_SIZE, len(all_chunks)) - 1,
+                    e,
                 )
 
         if failed_batches:

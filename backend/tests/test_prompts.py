@@ -9,14 +9,12 @@ Coverage:
   - Prompt caching split (fixed prefix + dynamic suffix)
 """
 
-import pytest
-
 from app.data.prompts import build_system_prompt, build_system_prompt_parts
-
 
 # ---------------------------------------------------------------------------
 # Tutor role
 # ---------------------------------------------------------------------------
+
 
 class TestTutorRole:
     def test_language_in_prompt(self):
@@ -40,6 +38,7 @@ class TestTutorRole:
 # Answer format
 # ---------------------------------------------------------------------------
 
+
 class TestAnswerFormat:
     def test_answer_format_section_present(self):
         prompt = build_system_prompt("독일어")
@@ -58,6 +57,7 @@ class TestAnswerFormat:
 # Constraints
 # ---------------------------------------------------------------------------
 
+
 class TestConstraints:
     def test_encouragement_rule_present(self):
         """Tutor must not negatively evaluate learner."""
@@ -72,6 +72,7 @@ class TestConstraints:
 # ---------------------------------------------------------------------------
 # RAG chunk injection
 # ---------------------------------------------------------------------------
+
 
 class TestRagInjection:
     def test_rag_chunks_appear_in_prompt(self):
@@ -93,6 +94,7 @@ class TestRagInjection:
 # ---------------------------------------------------------------------------
 # Prompt caching split
 # ---------------------------------------------------------------------------
+
 
 class TestPromptCaching:
     def test_returns_two_parts(self):

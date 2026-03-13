@@ -105,7 +105,8 @@ class ConversationRepository:
             # Verify ownership
             conv = await conn.fetchrow(
                 "SELECT id FROM conversations WHERE id = $1 AND user_id = $2",
-                conversation_id, user_id,
+                conversation_id,
+                user_id,
             )
             if not conv:
                 return -1  # not found or not owned
@@ -536,11 +537,13 @@ class PdfFileRepository:
                 # Delete messages via conversations (messages CASCADE on conversation delete)
                 await conn.execute(
                     "DELETE FROM conversations WHERE pdf_id = $1 AND user_id = $2",
-                    pdf_id, user_id,
+                    pdf_id,
+                    user_id,
                 )
                 result = await conn.execute(
                     "DELETE FROM pdf_files WHERE id = $1 AND user_id = $2",
-                    pdf_id, user_id,
+                    pdf_id,
+                    user_id,
                 )
         return result != "DELETE 0"
 

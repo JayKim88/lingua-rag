@@ -20,10 +20,8 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, UploadFi
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.core.config import settings
 from app.core.storage import object_path, storage_upload
 from app.db.repositories import PdfFileRepository, VectorSearchRepository
-from app.models.schemas import ChatRequest
 from app.services.claude_service import ClaudeService
 from app.services.embedding_service import get_embedding_service
 from app.services.indexing_service import index_pdf
@@ -58,14 +56,14 @@ def _check_upload_rate(ip: str) -> None:
     if len(timestamps) >= _UPLOAD_LIMIT:
         raise HTTPException(
             429,
-            f"Upload limit reached ({_UPLOAD_LIMIT} per day). "
-            "Please sign in to upload more PDFs.",
+            f"Upload limit reached ({_UPLOAD_LIMIT} per day). Please sign in to upload more PDFs.",
         )
 
 
 def _record_upload(ip: str) -> None:
     """Record a successful upload for rate limiting."""
     _upload_tracker.setdefault(ip, []).append(time.time())
+
 
 # Per-session streaming lock (prevent concurrent streams for same guest pdf)
 _SESSION_LOCK_LIMIT = 500
@@ -98,7 +96,9 @@ async def guest_upload_pdf(
 ):
     """Upload a PDF without authentication. Limited to < 100 pages, 10MB, 3/day per IP."""
     # Rate limit by IP
-    client_ip = (request.headers.get("x-forwarded-for") or request.client.host if request.client else "unknown").split(",")[0].strip()
+    forwarded = request.headers.get("x-forwarded-for")
+    host = request.client.host if request.client else "unknown"
+    client_ip = (forwarded or host).split(",")[0].strip()
     _check_upload_rate(client_ip)
 
     content_type = file.content_type or ""
@@ -141,9 +141,7 @@ async def guest_upload_pdf(
         raise HTTPException(500, "Failed to store PDF")
 
     # Save metadata to DB (uses sentinel guest UUID)
-    meta = await pdf_repo.create(
-        GUEST_USER_ID, pdf_id, file.filename or "document.pdf", len(content), total_pages
-    )
+    meta = await pdf_repo.create(GUEST_USER_ID, pdf_id, file.filename or "document.pdf", len(content), total_pages)
 
     # Record successful upload for rate limiting
     _record_upload(client_ip)
@@ -158,9 +156,7 @@ async def guest_upload_pdf(
         "total_pages": meta["total_pages"],
         "index_status": meta.get("index_status", "pending"),
         "created_at": (
-            meta["created_at"].timestamp()
-            if hasattr(meta["created_at"], "timestamp")
-            else meta["created_at"]
+            meta["created_at"].timestamp() if hasattr(meta["created_at"], "timestamp") else meta["created_at"]
         ),
     }
 
@@ -197,10 +193,18 @@ def _sse_done() -> str:
 
 
 _LANG_NAMES: dict[str, str] = {
-    "de-DE": "독일어", "de-AT": "독일어", "de-CH": "독일어",
-    "en-US": "영어", "en-GB": "영어",
-    "fr-FR": "프랑스어", "es-ES": "스페인어", "it-IT": "이탈리아어",
-    "pt-BR": "포르투갈어", "ja-JP": "일본어", "zh-CN": "중국어", "ko-KR": "한국어",
+    "de-DE": "독일어",
+    "de-AT": "독일어",
+    "de-CH": "독일어",
+    "en-US": "영어",
+    "en-GB": "영어",
+    "fr-FR": "프랑스어",
+    "es-ES": "스페인어",
+    "it-IT": "이탈리아어",
+    "pt-BR": "포르투갈어",
+    "ja-JP": "일본어",
+    "zh-CN": "중국어",
+    "ko-KR": "한국어",
 }
 
 
@@ -224,10 +228,12 @@ async def guest_chat_endpoint(body: GuestChatRequest):
             if body.history:
                 for msg in body.history[-10:]:
                     if msg.get("role") in ("user", "assistant") and msg.get("content"):
-                        history.append({
-                            "role": msg["role"],
-                            "content": msg["content"],
-                        })
+                        history.append(
+                            {
+                                "role": msg["role"],
+                                "content": msg["content"],
+                            }
+                        )
 
             # RAG: search indexed chunks when pdf_id is provided
             rag_chunks: list[str] = []
@@ -285,10 +291,12 @@ async def guest_chat_endpoint(body: GuestChatRequest):
                 yield _sse({"type": "done"})
             except Exception as exc:
                 logger.exception("Guest chat error: %s", exc)
-                yield _sse({
-                    "type": "error",
-                    "message": "서버에서 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
-                })
+                yield _sse(
+                    {
+                        "type": "error",
+                        "message": "서버에서 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+                    }
+                )
             finally:
                 yield _sse_done()
 
