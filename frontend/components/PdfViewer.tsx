@@ -10,10 +10,39 @@ import {
   useMemo,
 } from "react";
 import PronunciationModal from "./PronunciationModal";
+import NoteSlidePanel from "./NoteSlidePanel";
 import { TTS_LANGUAGES } from "@/hooks/useTTS";
 import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/TextLayer.css";
 import "react-pdf/dist/Page/AnnotationLayer.css";
+
+// Inject note-highlight hover & flash styles once
+if (typeof document !== "undefined" && !document.getElementById("note-highlight-styles")) {
+  const style = document.createElement("style");
+  style.id = "note-highlight-styles";
+  style.textContent = `
+    .note-highlight:hover {
+      background: rgba(250,204,21,0.55) !important;
+      cursor: pointer;
+    }
+    @keyframes noteFlash {
+      0%, 100% { background: rgba(250,204,21,0.7); }
+      50% { background: rgba(250,204,21,0.2); }
+    }
+    .note-highlight-flash {
+      animation: noteFlash 0.4s ease-in-out 3;
+    }
+    @keyframes vocabFlash {
+      0%, 100% { background: rgba(239,68,68,0.55); }
+      50% { background: rgba(239,68,68,0.15); }
+    }
+    .vocab-highlight-flash {
+      animation: vocabFlash 0.4s ease-in-out 3;
+    }
+  `;
+  document.head.appendChild(style);
+}
+
 import {
   savePdfToLibrary,
   loadPdfFromLibrary,
@@ -37,7 +66,12 @@ import {
   savePdfLanguage,
   fetchLastPage,
   saveLastPage,
+  fetchVocabulary,
+  createVocabulary,
+  updateVocabulary,
+  deleteVocabulary,
   type Annotation,
+  type VocabEntry,
 } from "@/lib/annotations";
 
 export type { PdfMeta };
@@ -140,8 +174,12 @@ interface SelectionPopup {
 
 export interface PdfViewerHandle {
   getPageText: () => Promise<string | null>;
+  getPageNumber: () => number;
   getNumPages: () => number;
   hasFile: () => boolean;
+  getPdfId: () => string | null;
+  /** Directly save a memo note on the current page */
+  addNote: (memoText: string) => Promise<void>;
 }
 
 interface PdfViewerProps {
@@ -157,6 +195,7 @@ interface PdfViewerProps {
   openFile?: File | null; // external file to open (set by parent modal)
   onClose?: () => void; // called when the viewer's close button is clicked
   pdfServerId?: string | null; // server PDF ID (set by parent after upload)
+  isGuest?: boolean; // guest mode — skip server API calls (annotations, vocabulary, language, last-page)
 }
 
 const STICKY_COLORS: Record<string, { header: string; body: string }> = {
@@ -177,6 +216,7 @@ function PdfViewerInner(
     openFile,
     onClose,
     pdfServerId: pdfServerIdProp,
+    isGuest,
   }: PdfViewerProps,
   ref: React.ForwardedRef<PdfViewerHandle>,
 ) {
@@ -223,16 +263,32 @@ function PdfViewerInner(
   // Monotonic counter to force Document remount on every file change
   const [fileGeneration, setFileGeneration] = useState(0);
 
-  // Spotlight search drag state (percentage-based for responsive)
-  const [spotlightPos, setSpotlightPos] = useState<{ x: number; y: number }>(() => {
-    if (typeof window === "undefined") return { x: 50, y: 5 };
-    try {
-      const saved = localStorage.getItem("lingua_spotlight_pos");
-      return saved ? JSON.parse(saved) : { x: 50, y: 5 };
-    } catch { return { x: 50, y: 5 }; }
-  });
+  // Spotlight search drag state (viewport px)
+  const [spotlightPos, setSpotlightPos] = useState<{ x: number; y: number }>({ x: -1, y: -1 });
   const spotlightDrag = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
   const spotlightRef = useRef<HTMLDivElement>(null);
+
+  // Highlight note state
+  const [notePanel, setNotePanel] = useState<{
+    open: boolean;
+    highlightedText?: string;
+    pageNumber?: number;
+    forcePageFilter?: boolean;
+    /** 0-based occurrence index of highlighted text on the page */
+    highlightIndex?: number;
+  }>({ open: false });
+  // Separate state for panel note flash (with key to allow re-triggering same text)
+  const [panelFlash, setPanelFlash] = useState<{ text: string; key: number } | null>(null);
+  const panelFlashKeyRef = useRef(0);
+  const [flashHighlight, setFlashHighlight] = useState<{ text: string; key: number; source?: "vocab" } | null>(null);
+  const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flashKeyRef = useRef(0);
+
+  // Vocabulary state
+  const [vocabList, setVocabList] = useState<VocabEntry[]>([]);
+  const [initialVocabWord, setInitialVocabWord] = useState("");
+  const [forceVocabTab, setForceVocabTab] = useState(false);
+  const [forceMemoTab, setForceMemoTab] = useState(false);
 
   // Annotation state
   const [isStickyMode, setIsStickyMode] = useState(false);
@@ -269,19 +325,93 @@ function PdfViewerInner(
   const [isSearching, setIsSearching] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  // Highlight search terms on the PDF text layer
-  const searchHighlightRenderer = useCallback(
-    (textItem: { str: string }) => {
-      if (!searchQuery.trim()) return textItem.str;
-      const query = searchQuery.trim();
-      const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const regex = new RegExp(`(${escaped})`, "gi");
-      return textItem.str.replace(
-        regex,
-        '<mark style="background:rgba(250,204,21,0.5);color:inherit;padding:0;border-radius:2px">$1</mark>',
-      );
+  // All highlight-type annotations (includes both text-highlight notes and plain memos)
+  const highlightNotes = useMemo(
+    () => annotations.filter((a) => a.type === "highlight"),
+    [annotations],
+  );
+  // Only notes with actual highlighted text (for rendering blue marks in PDF)
+  const highlightMarks = useMemo(
+    () => highlightNotes.filter((a) => a.highlighted_text),
+    [highlightNotes],
+  );
+
+  // Build a lookup: "page:highlightedText" → Set of occurrence indices to highlight
+  const targetOccurrences = useMemo(() => {
+    const map = new Map<string, { indices: Set<number>; flash: boolean }>();
+    for (const note of highlightMarks) {
+      const key = `${note.page_num}:${note.highlighted_text}`;
+      if (!map.has(key)) map.set(key, { indices: new Set(), flash: false });
+      const entry = map.get(key)!;
+      entry.indices.add(note.y_pct ?? 0);
+      if (flashHighlight?.text === note.highlighted_text) entry.flash = true;
+    }
+    return map;
+  }, [highlightMarks, flashHighlight]);
+
+  // Occurrence counter ref — cleared every render so zoom/scroll re-renders start fresh
+  const highlightCounterRef = useRef(new Map<string, number>());
+  highlightCounterRef.current = new Map();
+
+  // Combined text renderer: search highlights (yellow) + note highlights (blue)
+  const combinedTextRenderer = useCallback(
+    (textItem: { str: string; pageNumber: number }) => {
+      let result = textItem.str;
+      // Apply search highlights
+      if (showSearch && searchQuery.trim()) {
+        const escaped = searchQuery.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const regex = new RegExp(`(${escaped})`, "gi");
+        result = result.replace(
+          regex,
+          '<mark style="background:rgba(250,204,21,0.5);color:inherit;padding:0;border-radius:2px">$1</mark>',
+        );
+      }
+      // Apply note highlights (blue) for this page
+      const pageNotes = highlightMarks.filter((n) => n.page_num === textItem.pageNumber);
+      const seenTexts = new Set<string>();
+      for (const note of pageNotes) {
+        const ht = note.highlighted_text!;
+        if (seenTexts.has(ht)) continue; // Process each unique text once per chunk
+        seenTexts.add(ht);
+
+        if (!textItem.str.includes(ht)) continue; // Only when chunk contains the full highlighted text
+        const counters = highlightCounterRef.current;
+        const key = `${textItem.pageNumber}:${ht}`;
+        const current = counters.get(key) ?? 0;
+        counters.set(key, current + 1);
+
+        // Check if this occurrence should be highlighted
+        const target = targetOccurrences.get(key);
+        if (!target || !target.indices.has(current)) continue;
+
+        const escaped = ht.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const regex = new RegExp(`(${escaped})`, "gi");
+        const isFlashing = target.flash;
+        const bg = isFlashing ? "rgba(250,204,21,0.7)" : "rgba(250,204,21,0.35)";
+        const cls = isFlashing ? "note-highlight note-highlight-flash" : "note-highlight";
+        result = result.replace(
+          regex,
+          `<mark class="${cls}" data-note-text="${ht.replace(/"/g, "&quot;")}" data-note-page="${textItem.pageNumber}" style="background:${bg};color:inherit;padding:0;border-radius:2px;cursor:pointer;transition:background 0.2s">$1</mark>`,
+        );
+      }
+      // Flash highlight for vocab words (red, first occurrence on page only)
+      if (flashHighlight?.source === "vocab" && textItem.str.includes(flashHighlight.text)) {
+        const counters = highlightCounterRef.current;
+        const vocabKey = `vocab-flash:${textItem.pageNumber}:${flashHighlight.text}`;
+        const seen = counters.get(vocabKey) ?? 0;
+        if (seen === 0) {
+          counters.set(vocabKey, 1);
+          const escaped = flashHighlight.text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const regex = new RegExp(`(${escaped})`, "i");
+          result = result.replace(
+            regex,
+            '<mark class="vocab-highlight-flash" style="background:rgba(239,68,68,0.55);color:inherit;padding:0;border-radius:2px">$1</mark>',
+          );
+        }
+      }
+      return result;
     },
-    [searchQuery],
+    [showSearch, searchQuery, highlightMarks, flashHighlight, targetOccurrences],
   );
 
   const pageNumberRef = useRef(pageNumber);
@@ -320,6 +450,15 @@ function PdfViewerInner(
       getNumPages: () => numPages,
       hasFile: () => !!file,
       getPdfId: () => pdfServerId,
+      addNote: async (memoText: string) => {
+        if (!pdfServerId) return;
+        const created = await createAnnotation(
+          pdfServerId, pageNumber, 0, 0, memoText, "blue", "highlight", undefined,
+        );
+        if (created) {
+          setAnnotations((prev) => [...prev, created]);
+        }
+      },
     }),
     [pageNumber, numPages, file, pdfServerId],
   );
@@ -383,16 +522,17 @@ function PdfViewerInner(
     return () => obs.disconnect();
   }, [numPages, scale]);
 
-  // Load all annotations in a single request when pdfServerId changes
+  // Load all annotations and vocabulary when pdfServerId changes
   useEffect(() => {
     if (!pdfServerId) {
       setAnnotations([]);
+      setVocabList([]);
       return;
     }
-    fetchAnnotations(pdfServerId)
-      .then(setAnnotations)
-      .catch(() => {});
-  }, [pdfServerId]);
+    if (isGuest) return; // guest has no server-side data
+    fetchAnnotations(pdfServerId).then(setAnnotations).catch(() => {});
+    fetchVocabulary(pdfServerId).then(setVocabList).catch(() => {});
+  }, [pdfServerId, isGuest]);
 
   // Pin drag — move annotation to new position on mouseup
   useEffect(() => {
@@ -461,6 +601,11 @@ function PdfViewerInner(
   // Otherwise, auto-open the language picker so the user chooses.
   useEffect(() => {
     if (!pdfServerId) return;
+    if (isGuest) {
+      // Guest: no server-side language — just prompt if needed
+      if (!language) { setPendingLang(null); setShowLangModal(true); }
+      return;
+    }
     fetchPdfLanguage(pdfServerId)
       .then((serverLang) => {
         if (serverLang) {
@@ -476,11 +621,12 @@ function PdfViewerInner(
         }
       })
       .catch(() => {});
-  }, [pdfServerId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pdfServerId, isGuest]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Restore last viewed page when PDF loads (pdfServerId + numPages both ready)
   useEffect(() => {
     if (!pdfServerId || numPages === 0) return;
+    if (isGuest) { setPdfReady(true); return; }
     fetchLastPage(pdfServerId)
       .then((page) => {
         lastSavedPageRef.current = page;
@@ -490,11 +636,11 @@ function PdfViewerInner(
       .catch(() => {
         setPdfReady(true);
       });
-  }, [pdfServerId, numPages]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pdfServerId, numPages, isGuest]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-save last page with 1.5s debounce on pageNumber change
   useEffect(() => {
-    if (!pdfServerId || pageNumber < 1) return;
+    if (!pdfServerId || pageNumber < 1 || isGuest) return;
     if (lastPageSaveTimer.current) clearTimeout(lastPageSaveTimer.current);
     lastPageSaveTimer.current = setTimeout(() => {
       if (pageNumber === lastSavedPageRef.current) return;
@@ -539,6 +685,9 @@ function PdfViewerInner(
     return () => scrollArea.removeEventListener("scroll", handleScroll);
   }, [numPages]); // re-attach after PDF loads and scroll area mounts
 
+  // Track if mousedown landed on a note highlight (for click detection)
+  const noteClickRef = useRef<{ text: string; page: number } | null>(null);
+
   const isDragging = useRef(false);
   // Cache: textContent items + viewport for the current page
   const textContentCache = useRef<{
@@ -555,8 +704,8 @@ function PdfViewerInner(
   useEffect(() => {
     if (openFile) {
       handleFileChange(openFile, true);
-      // New upload (no server ID yet) → show language picker immediately
-      if (!pdfServerIdProp) {
+      // New upload (no server ID yet) → show language picker if no language chosen
+      if (!pdfServerIdProp && !language) {
         setPendingLang(null);
         setShowLangModal(true);
       }
@@ -622,31 +771,47 @@ function PdfViewerInner(
       }
       if (e.key === "Escape") {
         setShowSearch(false);
-        setSearchQuery("");
-        setSearchResults([]);
       }
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [file]);
 
-  // Focus search input when panel opens
+  // Focus search input when panel opens + restore/init position
   useEffect(() => {
     if (showSearch) {
+      if (spotlightPos.x < 0) {
+        try {
+          const saved = localStorage.getItem("lingua_spotlight_pos");
+          if (saved) {
+            const p = JSON.parse(saved);
+            setSpotlightPos(p);
+            spotlightPosRef.current = p;
+          } else {
+            const def = { x: Math.round(window.innerWidth / 2), y: 80 };
+            setSpotlightPos(def);
+            spotlightPosRef.current = def;
+          }
+        } catch {
+          const def = { x: Math.round(window.innerWidth / 2), y: 80 };
+          setSpotlightPos(def);
+          spotlightPosRef.current = def;
+        }
+      }
       setTimeout(() => searchInputRef.current?.focus(), 50);
     }
-  }, [showSearch]);
+  }, [showSearch]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Spotlight drag-to-move (uses document-level mousemove/mouseup for smooth dragging)
+  // Spotlight drag-to-move (viewport-based px coordinates)
   const spotlightPosRef = useRef(spotlightPos);
   useEffect(() => {
     const onMouseMove = (e: MouseEvent) => {
       const d = spotlightDrag.current;
-      if (!d || !containerRef.current) return;
-      const rect = containerRef.current.getBoundingClientRect();
-      const xPct = d.origX + ((e.clientX - d.startX) / rect.width) * 100;
-      const yPct = d.origY + ((e.clientY - d.startY) / rect.height) * 100;
-      const next = { x: Math.max(5, Math.min(95, xPct)), y: Math.max(0, Math.min(80, yPct)) };
+      if (!d) return;
+      const next = {
+        x: Math.max(0, Math.min(window.innerWidth - 100, d.origX + (e.clientX - d.startX))),
+        y: Math.max(0, Math.min(window.innerHeight - 60, d.origY + (e.clientY - d.startY))),
+      };
       spotlightPosRef.current = next;
       setSpotlightPos(next);
     };
@@ -783,6 +948,19 @@ function PdfViewerInner(
         width: number;
         height: number;
       }[] = [];
+      // When customTextRenderer injects <mark> tags, the Range container
+      // may be a text node inside <mark> rather than directly inside <span>.
+      // Resolve the offset relative to the full span text by walking all text nodes.
+      const resolveOffset = (span: Element, container: Node, offset: number): number => {
+        let chars = 0;
+        const walker = document.createTreeWalker(span, NodeFilter.SHOW_TEXT);
+        let node: Node | null;
+        while ((node = walker.nextNode())) {
+          if (node === container) return chars + offset;
+          chars += (node.textContent ?? "").length;
+        }
+        return offset; // fallback
+      };
       for (const sp of selSpans) {
         const spText = (sp.textContent ?? "").trim();
         if (!spText) continue;
@@ -822,15 +1000,14 @@ function PdfViewerInner(
             ctx.font = window.getComputedStyle(sp).font;
             const fw = ctx.measureText(itm.str as string).width;
             if (fw > 0) {
-              if (isStart)
-                sf =
-                  ctx.measureText(
-                    (itm.str as string).slice(0, range.startOffset),
-                  ).width / fw;
-              if (isEnd)
-                ef =
-                  ctx.measureText((itm.str as string).slice(0, range.endOffset))
-                    .width / fw;
+              if (isStart) {
+                const so = resolveOffset(sp, range.startContainer, range.startOffset);
+                sf = ctx.measureText((itm.str as string).slice(0, so)).width / fw;
+              }
+              if (isEnd) {
+                const eo = resolveOffset(sp, range.endContainer, range.endOffset);
+                ef = ctx.measureText((itm.str as string).slice(0, eo)).width / fw;
+              }
             }
           }
         }
@@ -901,6 +1078,17 @@ function PdfViewerInner(
         setPopup(null);
       }
 
+      // Check if clicking on a note highlight
+      const mark = (e.target as HTMLElement).closest?.(".note-highlight") as HTMLElement | null;
+      if (mark) {
+        noteClickRef.current = {
+          text: mark.getAttribute("data-note-text") || "",
+          page: Number(mark.getAttribute("data-note-page")) || 0,
+        };
+      } else {
+        noteClickRef.current = null;
+      }
+
       const textLayer = findTextLayer(e.target as Node);
       const isOnPopup = popupEl?.contains(e.target as Node);
 
@@ -960,6 +1148,29 @@ function PdfViewerInner(
 
     const handleMouseUp = (e: MouseEvent) => {
       isDragging.current = false;
+
+      // If it was a click (not drag) on a note highlight, open the panel
+      const nc = noteClickRef.current;
+      if (nc && nc.text && nc.page) {
+        const start = dragStartPoint.current;
+        if (start) {
+          const dx = e.clientX - start.x;
+          const dy = e.clientY - start.y;
+          if (dx * dx + dy * dy < 25) {
+            // It's a click, not a drag
+            dragStartPoint.current = null;
+            noteClickRef.current = null;
+            setForceMemoTab(true);
+            setForceVocabTab(false);
+            setNotePanel({ open: true, highlightedText: undefined, pageNumber: nc.page, forcePageFilter: true });
+            panelFlashKeyRef.current += 1;
+            setPanelFlash({ text: nc.text, key: panelFlashKeyRef.current });
+            return;
+          }
+        }
+      }
+      noteClickRef.current = null;
+
       setTimeout(async () => {
         const start = dragStartPoint.current;
         dragStartPoint.current = null;
@@ -1077,8 +1288,13 @@ function PdfViewerInner(
     pdfDocRef.current = null;
 
     // Find or create chatId for this file
+    // When called from parent (skipUpload=true), parent already set LIBRARY_CURRENT_KEY
+    // to the correct chatId — use it to avoid name-based lookup mismatching duplicates.
     const library = getLibraryMeta();
-    const existingEntry = library.find((m) => m.name === f.name);
+    const parentChatId = skipUpload ? localStorage.getItem(LIBRARY_CURRENT_KEY) : null;
+    const existingEntry = parentChatId
+      ? library.find((m) => m.chatId === parentChatId)
+      : library.find((m) => m.name === f.name);
     const chatId = existingEntry?.chatId ?? generateChatId();
     const meta = upsertLibraryMeta(f, chatId);
     const existing = meta.find((m) => m.chatId === chatId);
@@ -1288,7 +1504,7 @@ function PdfViewerInner(
                       pageNumber={n}
                       renderTextLayer={true}
                       renderAnnotationLayer={false}
-                      customTextRenderer={searchQuery.trim() ? searchHighlightRenderer : undefined}
+                      customTextRenderer={(showSearch && searchQuery.trim()) || highlightMarks.length > 0 || flashHighlight?.source === "vocab" ? combinedTextRenderer : undefined}
                       className="shadow-md"
                       width={pageWidth}
                       onRenderSuccess={(page) => {
@@ -1313,7 +1529,7 @@ function PdfViewerInner(
                           top: rect.top,
                           width: rect.width,
                           height: rect.height,
-                          backgroundColor: "rgba(250, 204, 21, 0.45)",
+                          backgroundColor: "rgba(96, 165, 250, 0.4)",
                           borderRadius: 2,
                           zIndex: 4,
                         }}
@@ -1559,13 +1775,21 @@ function PdfViewerInner(
           </Document>
         </div>
 
-        {/* Spotlight-style search overlay — draggable */}
-        {showSearch && (
+        {/* Spotlight-style search overlay — draggable, fixed to viewport */}
+        {showSearch && spotlightPos.x >= 0 && (
           <div
             ref={spotlightRef}
-            className="absolute z-20 w-[min(420px,90%)]"
-            style={{ left: `${spotlightPos.x}%`, top: `${spotlightPos.y}%`, transform: "translateX(-50%)" }}
-            onMouseLeave={() => { if (!spotlightDrag.current) { setShowSearch(false); setSearchQuery(""); setSearchResults([]); } }}
+            className="fixed z-50 w-[min(420px,90vw)]"
+            style={{ left: spotlightPos.x, top: spotlightPos.y, transform: "translateX(-50%)" }}
+            onBlur={() => {
+              // Delay check — element may unmount (e.g. X button) causing relatedTarget to be null
+              setTimeout(() => {
+                if (spotlightDrag.current) return;
+                if (!spotlightRef.current?.contains(document.activeElement)) {
+                  setShowSearch(false);
+                }
+              }, 0);
+            }}
           >
             <div className="bg-white/95 backdrop-blur-md border border-gray-200 rounded-2xl shadow-2xl overflow-hidden">
               {/* Drag handle bar */}
@@ -1589,12 +1813,12 @@ function PdfViewerInner(
                   ref={searchInputRef}
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Escape") { setShowSearch(false); setSearchQuery(""); setSearchResults([]); } }}
+                  onKeyDown={(e) => { if (e.key === "Escape") { setShowSearch(false); } }}
                   placeholder="페이지 내용 검색..."
                   className="flex-1 text-sm bg-transparent outline-none placeholder-gray-400 text-gray-900"
                 />
                 {searchQuery && (
-                  <button onClick={() => { setSearchQuery(""); setSearchResults([]); }} className="text-gray-400 hover:text-gray-600">
+                  <button onClick={() => { setSearchQuery(""); setSearchResults([]); requestAnimationFrame(() => searchInputRef.current?.focus()); }} className="text-gray-400 hover:text-gray-600">
                     <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                       <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
                     </svg>
@@ -1781,18 +2005,28 @@ function PdfViewerInner(
                 <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
               </svg>
             </button>
-            {/* Note mode toggle — only when PDF is server-uploaded */}
+            {/* Highlight notes button — only when PDF is server-uploaded */}
             {pdfServerId && (
               <>
                 <div className="w-px h-4 bg-gray-200 mx-0.5" />
                 <button
-                  onClick={() => { setIsStickyMode((v) => !v); setPendingSticky(null); }}
-                  title={isStickyMode ? "스티키 메모 끄기" : "스티키 메모 추가"}
-                  className={`p-1.5 rounded-md transition-colors ${isStickyMode ? "bg-yellow-100 text-yellow-700" : "hover:bg-gray-100"}`}
+                  onClick={() => {
+                    setPanelFlash(null);
+                    setNotePanel({ open: true, pageNumber });
+                  }}
+                  title="하이라이트 노트"
+                  className={`p-1.5 rounded-md transition-colors flex items-center gap-1 ${
+                    notePanel.open ? "bg-blue-100 text-blue-600" : "hover:bg-gray-100"
+                  }`}
                 >
                   <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" />
                   </svg>
+                  {highlightNotes.filter((n) => n.page_num === pageNumber).length > 0 && (
+                    <span className="text-[10px] font-semibold tabular-nums">
+                      {highlightNotes.filter((n) => n.page_num === pageNumber).length}
+                    </span>
+                  )}
                 </button>
               </>
             )}
@@ -2000,6 +2234,107 @@ function PdfViewerInner(
                 </svg>
                 연습
               </button>
+              {/* 노트 — only when PDF is server-uploaded */}
+              {pdfServerId && (
+                <>
+                  <div className="w-px bg-gray-200" />
+                  <button
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={async () => {
+                      setShowTtsPanel(false);
+                      setForceVocabTab(false);
+                      setForceMemoTab(true);
+                      // Compute occurrence index of selected text on the page
+                      let highlightIndex = 0;
+                      try {
+                        const doc = pdfDocRef.current;
+                        if (doc) {
+                          const pg = await doc.getPage(pageNumber);
+                          const content = await pg.getTextContent();
+                          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                          const fullText = content.items.map((it: any) => it.str).join("");
+                          const target = popup.text;
+                          let idx = fullText.indexOf(target);
+                          // Find which occurrence was selected using selection anchor position
+                          const sel = window.getSelection();
+                          const anchorNode = sel?.anchorNode;
+                          // Count occurrences before the selected one using DOM order
+                          if (anchorNode) {
+                            const textLayer = findTextLayer(anchorNode);
+                            if (textLayer) {
+                              const spans = Array.from(textLayer.querySelectorAll("span[role='presentation']"));
+                              let charsBefore = 0;
+                              for (const span of spans) {
+                                if (span.contains(anchorNode)) break;
+                                charsBefore += (span.textContent || "").length;
+                              }
+                              // Find which occurrence's position is closest to charsBefore
+                              let occ = 0;
+                              while (idx !== -1) {
+                                if (idx >= charsBefore - target.length) {
+                                  highlightIndex = occ;
+                                  break;
+                                }
+                                occ++;
+                                idx = fullText.indexOf(target, idx + 1);
+                              }
+                            }
+                          }
+                        }
+                      } catch { /* fallback to 0 */ }
+                      setNotePanel({
+                        open: true,
+                        highlightedText: popup.text,
+                        pageNumber: pageNumber,
+                        highlightIndex,
+                      });
+                      setPopup(null);
+                      setPopupTranslation(null);
+                      setSelectionRects([]);
+                      window.getSelection()?.removeAllRanges();
+                    }}
+                    className="px-3 py-2 text-xs font-medium text-blue-600 hover:bg-blue-50 active:bg-blue-200 active:scale-95 transition-all flex items-center gap-1.5"
+                    title="하이라이트 노트"
+                  >
+                    <svg
+                      className="w-3.5 h-3.5"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                      strokeWidth={2}
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z"
+                      />
+                    </svg>
+                    노트
+                  </button>
+                  <div className="w-px bg-gray-200" />
+                  {/* 단어장 */}
+                  <button
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      setShowTtsPanel(false);
+                      setInitialVocabWord(popup.text);
+                      setForceVocabTab(true);
+                      setNotePanel({ open: true, pageNumber });
+                      setPopup(null);
+                      setPopupTranslation(null);
+                      setSelectionRects([]);
+                      window.getSelection()?.removeAllRanges();
+                    }}
+                    className="px-3 py-2 text-xs font-medium text-amber-700 hover:bg-amber-50 active:bg-amber-200 active:scale-95 transition-all flex items-center gap-1.5"
+                    title="단어장에 추가"
+                  >
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25" />
+                    </svg>
+                    단어장
+                  </button>
+                </>
+              )}
             </div>
             {/* TTS controls row (shown on 소리 button hover) */}
             {showTtsPanel && (
@@ -2154,7 +2489,7 @@ function PdfViewerInner(
                   const lang = pendingLang ?? language;
                   if (lang) {
                     onLanguageChange(lang);
-                    if (pdfServerId)
+                    if (pdfServerId && !isGuest)
                       savePdfLanguage(pdfServerId, lang).catch(() => {});
                   }
                   setPendingLang(null);
@@ -2168,6 +2503,92 @@ function PdfViewerInner(
             </div>
           </div>
         )}
+
+        {/* Highlight note slide panel */}
+        <NoteSlidePanel
+          open={notePanel.open}
+          highlightedText={notePanel.highlightedText}
+          pageNumber={notePanel.pageNumber ?? pageNumber}
+          notes={highlightNotes}
+          forcePageFilter={notePanel.forcePageFilter}
+          onSave={async (noteText, highlighted, page) => {
+            if (!pdfServerId) return;
+            const created = await createAnnotation(
+              pdfServerId, page, 0, highlighted ? (notePanel.highlightIndex ?? 0) : 0,
+              noteText, "blue", "highlight", highlighted ?? undefined,
+            );
+            if (created) {
+              setAnnotations((prev) => [...prev, created]);
+            }
+            // Clear flash and highlight mode so saved note doesn't flash
+            setPanelFlash(null);
+            if (highlighted) {
+              setNotePanel((prev) => ({ ...prev, highlightedText: undefined }));
+            }
+          }}
+          onUpdate={async (noteId, text) => {
+            if (!pdfServerId) return;
+            const note = annotations.find((a) => a.id === noteId);
+            if (!note) return;
+            const updated = await updateAnnotation(pdfServerId, noteId, text, note.color);
+            if (updated) {
+              setAnnotations((prev) => prev.map((a) => a.id === noteId ? updated : a));
+            }
+          }}
+          onDelete={async (noteId) => {
+            if (!pdfServerId) return;
+            const ok = await deleteAnnotation(pdfServerId, noteId);
+            if (ok) {
+              setAnnotations((prev) => prev.filter((a) => a.id !== noteId));
+            }
+          }}
+          onClose={() => {
+            setNotePanel({ open: false });
+            setForceVocabTab(false);
+            setForceMemoTab(false);
+            setInitialVocabWord("");
+          }}
+          onClearHighlight={() => {
+            setNotePanel((prev) => ({ ...prev, highlightedText: undefined }));
+          }}
+          forceMemoTab={forceMemoTab}
+          vocabulary={vocabList}
+          onVocabSave={async (word, meaning, page) => {
+            if (!pdfServerId) return;
+            const created = await createVocabulary(
+              pdfServerId, page, word, null, meaning, language,
+            );
+            if (created) setVocabList((prev) => [...prev, created]);
+          }}
+          onVocabUpdate={async (vocabId, word, meaning) => {
+            if (!pdfServerId) return;
+            const updated = await updateVocabulary(pdfServerId, vocabId, word, meaning);
+            if (updated) setVocabList((prev) => prev.map((v) => v.id === vocabId ? updated : v));
+          }}
+          onVocabDelete={async (vocabId) => {
+            if (!pdfServerId) return;
+            await deleteVocabulary(pdfServerId, vocabId);
+            setVocabList((prev) => prev.filter((v) => v.id !== vocabId));
+          }}
+          pdfLanguage={language}
+          initialVocabWord={initialVocabWord}
+          forceVocabTab={forceVocabTab}
+          speak={speak}
+          flashText={panelFlash?.text}
+          flashKey={panelFlash?.key ?? 0}
+          onFlashHighlight={(text, page, source) => {
+            // Scroll to the page first
+            scrollToPage(page);
+            // Trigger flash animation (incrementing key forces re-trigger even for same text)
+            if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+            flashKeyRef.current += 1;
+            setFlashHighlight({ text, key: flashKeyRef.current, source });
+            flashTimerRef.current = setTimeout(() => {
+              setFlashHighlight(null);
+              flashTimerRef.current = null;
+            }, 1500);
+          }}
+        />
       </div>
     </div>
   );

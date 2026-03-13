@@ -84,6 +84,13 @@ export default function ChatIdPage() {
   // Drag-drop state
   const [isDragging, setIsDragging] = useState(false);
 
+  // Context menu state
+  const [showCtxMenu, setShowCtxMenu] = useState(false);
+  const [ctxMenuPos, setCtxMenuPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [isRenaming, setIsRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const ctxMenuRef = useRef<HTMLDivElement>(null);
+
   // Modal state
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [loginMessage, setLoginMessage] = useState<string | undefined>();
@@ -244,6 +251,60 @@ export default function ChatIdPage() {
       document.removeEventListener("mouseup", onMouseUp);
     };
   }, []);
+
+  // Close context menu on outside click
+  useEffect(() => {
+    if (!showCtxMenu) return;
+    const handler = (e: MouseEvent) => {
+      if (ctxMenuRef.current && !ctxMenuRef.current.contains(e.target as Node)) {
+        setShowCtxMenu(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showCtxMenu]);
+
+  const handleRename = useCallback(() => {
+    const trimmed = renameValue.trim();
+    if (!trimmed || trimmed === activePdfName) {
+      setIsRenaming(false);
+      return;
+    }
+    // Update sessionStorage meta
+    const raw = JSON.parse(sessionStorage.getItem("guest-tab-pdfs") ?? "[]");
+    const updated = raw.map((m: { chatId?: string; name: string }) =>
+      m.chatId === id ? { ...m, name: trimmed } : m,
+    );
+    sessionStorage.setItem("guest-tab-pdfs", JSON.stringify(updated));
+    // Update localStorage meta
+    const libRaw = JSON.parse(localStorage.getItem("lingua_pdf_library") ?? "[]");
+    const libUpdated = libRaw.map((m: { chatId?: string; name: string }) =>
+      m.chatId === id ? { ...m, name: trimmed } : m,
+    );
+    localStorage.setItem("lingua_pdf_library", JSON.stringify(libUpdated));
+    setActivePdfName(trimmed);
+    setIsRenaming(false);
+  }, [renameValue, activePdfName, id]);
+
+  const handleDelete = useCallback(async () => {
+    if (pdfServerId) {
+      fetch(`/api/guest/pdfs/${pdfServerId}`, { method: "DELETE" }).catch(() => {});
+    }
+    // Remove from sessionStorage
+    const raw = JSON.parse(sessionStorage.getItem("guest-tab-pdfs") ?? "[]");
+    sessionStorage.setItem(
+      "guest-tab-pdfs",
+      JSON.stringify(raw.filter((m: { chatId?: string }) => m.chatId !== id)),
+    );
+    // Remove from localStorage
+    const libRaw = JSON.parse(localStorage.getItem("lingua_pdf_library") ?? "[]");
+    localStorage.setItem(
+      "lingua_pdf_library",
+      JSON.stringify(libRaw.filter((m: { chatId?: string }) => m.chatId !== id)),
+    );
+    localStorage.removeItem(LIBRARY_CURRENT_KEY);
+    router.push("/");
+  }, [id, pdfServerId, router]);
 
   /* ── Helpers ── */
 
@@ -509,16 +570,89 @@ export default function ChatIdPage() {
               </div>
               <div className="space-y-0.5">
                 {hasPdf ? (
-                  <button className="w-full flex items-center gap-1.5 px-1.5 py-1.5 text-xs truncate rounded-md bg-gray-200 text-gray-900 font-medium">
-                    <svg
-                      className="w-3 h-3 text-red-400 shrink-0"
-                      fill="currentColor"
-                      viewBox="0 0 24 24"
+                  <div className="group flex items-center rounded-md bg-gray-200">
+                    <button
+                      className="flex-1 min-w-0 flex items-center gap-1.5 px-1.5 py-1.5 text-xs truncate text-gray-900 font-medium"
                     >
-                      <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zm-1 1.5L18.5 9H13V3.5z" />
-                    </svg>
-                    <span className="truncate">{activePdfName}</span>
-                  </button>
+                      <svg
+                        className="w-3 h-3 text-red-400 shrink-0"
+                        fill="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zm-1 1.5L18.5 9H13V3.5z" />
+                      </svg>
+                      {isRenaming ? (
+                        <input
+                          autoFocus
+                          value={renameValue}
+                          onChange={(e) => setRenameValue(e.target.value)}
+                          onBlur={() => handleRename()}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") handleRename();
+                            if (e.key === "Escape") setIsRenaming(false);
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                          className="truncate bg-white border border-blue-400 rounded px-1 py-0 text-xs text-gray-900 outline-none w-full"
+                        />
+                      ) : (
+                        <span className="truncate">{activePdfName}</span>
+                      )}
+                    </button>
+                    <div className="relative">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          setShowCtxMenu((prev) => !prev);
+                          setCtxMenuPos({ x: rect.left, y: rect.bottom + 4 });
+                        }}
+                        title="더보기"
+                        className="opacity-0 group-hover:opacity-100 p-1 mr-0.5 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-300 transition-all shrink-0"
+                      >
+                        <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor">
+                          <circle cx="8" cy="3" r="1.5" />
+                          <circle cx="8" cy="8" r="1.5" />
+                          <circle cx="8" cy="13" r="1.5" />
+                        </svg>
+                      </button>
+                      {showCtxMenu && (
+                        <div
+                          ref={ctxMenuRef}
+                          className="fixed z-50 w-36 bg-white rounded-lg shadow-lg border border-gray-200 py-1 text-xs"
+                          style={{ left: ctxMenuPos.x, top: ctxMenuPos.y }}
+                        >
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setRenameValue(activePdfName ?? "");
+                              setIsRenaming(true);
+                              setShowCtxMenu(false);
+                            }}
+                            className="w-full flex items-center gap-2 px-3 py-2 text-gray-700 hover:bg-gray-50 transition-colors"
+                          >
+                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                            </svg>
+                            이름 변경
+                          </button>
+                          <div className="h-px bg-gray-100 my-1" />
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setShowCtxMenu(false);
+                              handleDelete();
+                            }}
+                            className="w-full flex items-center gap-2 px-3 py-2 text-red-600 hover:bg-red-50 transition-colors"
+                          >
+                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                            삭제
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 ) : (
                   <p className="text-xs text-gray-300 px-1.5 py-3 text-center leading-relaxed">
                     PDF를 추가해보세요
@@ -620,6 +754,8 @@ export default function ChatIdPage() {
                   onLanguageChange={setLanguage}
                   openFile={openFile}
                   onClose={() => router.push("/")}
+                  pdfServerId={pdfServerId}
+                  isGuest={!isLoggedIn}
                 />
               </main>
             )}
