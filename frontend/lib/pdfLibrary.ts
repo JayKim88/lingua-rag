@@ -6,10 +6,9 @@ const IDB_STORE = "pdf-files";
 
 export const LIBRARY_META_KEY = "lingua-pdf-library";
 export const LIBRARY_CURRENT_KEY = "lingua-pdf-current"; // stores chatId
-export const LIBRARY_MAX = 10;
 
 export type IndexStatus = "pending" | "indexing" | "ready" | "failed";
-export interface PdfMeta { name: string; size: number; lastOpened: string; addedAt: number; pdfServerId?: string; indexStatus?: IndexStatus; chatId?: string; folderId?: string | null }
+export interface PdfMeta { name: string; size: number; lastOpened: string; addedAt: number; pdfServerId?: string; indexStatus?: IndexStatus; chatId?: string; folderId?: string | null; sortOrder?: number; bookmarked?: boolean }
 
 // Generate a short random ID (nanoid-style, 21 chars)
 export function generateChatId(): string {
@@ -111,6 +110,10 @@ export function getLibraryMeta(): PdfMeta[] {
         entry.chatId = generateChatId();
         needsPersist = true;
       }
+      if (entry.sortOrder === undefined) {
+        entry.sortOrder = entry.addedAt;
+        needsPersist = true;
+      }
       return entry;
     });
     // Deduplicate by chatId
@@ -133,16 +136,16 @@ export function upsertLibraryMeta(file: File, chatId: string): PdfMeta[] {
   const existing = list.find((m) => m.chatId === chatId);
   let updated: PdfMeta[];
   if (existing) {
-    // Update lastOpened in-place; preserve insertion order, addedAt, pdfServerId
+    // Update lastOpened in-place; preserve insertion order, addedAt, pdfServerId, and user-renamed name
     updated = list.map((m) =>
-      m.chatId === chatId ? { ...m, name: file.name, size: file.size, lastOpened: now } : m,
+      m.chatId === chatId ? { ...m, size: file.size, lastOpened: now } : m,
     );
   } else {
     // Append new entry at end to preserve registration order
     updated = [
       ...list,
-      { name: file.name, size: file.size, lastOpened: now, addedAt: Date.now(), chatId },
-    ].slice(0, LIBRARY_MAX);
+      { name: file.name, size: file.size, lastOpened: now, addedAt: Date.now(), chatId, indexStatus: "pending" as IndexStatus, sortOrder: Date.now() },
+    ];
   }
   localStorage.setItem(LIBRARY_META_KEY, JSON.stringify(updated));
   return updated;
@@ -162,6 +165,17 @@ export function updateLibraryIndexStatus(chatId: string, indexStatus: IndexStatu
   localStorage.setItem(LIBRARY_META_KEY, JSON.stringify(updated));
 }
 
+export function toggleLibraryMetaBookmark(chatId: string): boolean {
+  const list = getLibraryMeta();
+  const meta = list.find((m) => m.chatId === chatId);
+  const next = !meta?.bookmarked;
+  const updated = list.map((m) =>
+    m.chatId === chatId ? { ...m, bookmarked: next } : m,
+  );
+  localStorage.setItem(LIBRARY_META_KEY, JSON.stringify(updated));
+  return next;
+}
+
 export function setLibraryMetaFolderId(chatId: string, folderId: string | null): void {
   const updated = getLibraryMeta().map((m) =>
     m.chatId === chatId ? { ...m, folderId } : m,
@@ -173,6 +187,19 @@ export function removeLibraryMeta(chatId: string): PdfMeta[] {
   const updated = getLibraryMeta().filter((m) => m.chatId !== chatId);
   localStorage.setItem(LIBRARY_META_KEY, JSON.stringify(updated));
   return updated;
+}
+
+export function sortByOrder(metas: PdfMeta[]): PdfMeta[] {
+  return [...metas].sort((a, b) => (a.sortOrder ?? a.addedAt) - (b.sortOrder ?? b.addedAt));
+}
+
+export function setLibraryMetaSortOrders(updates: Array<{ chatId: string; sortOrder: number }>): void {
+  const map = new Map(updates.map((u) => [u.chatId, u.sortOrder]));
+  const updated = getLibraryMeta().map((m) => {
+    const so = map.get(m.chatId!);
+    return so !== undefined ? { ...m, sortOrder: so } : m;
+  });
+  localStorage.setItem(LIBRARY_META_KEY, JSON.stringify(updated));
 }
 
 // ---------------------------------------------------------------------------

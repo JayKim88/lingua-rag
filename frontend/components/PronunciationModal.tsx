@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useMemo } from "react";
+import { useState, useRef, useEffect, useMemo, useCallback } from "react";
 
 interface Props {
   text: string;
@@ -135,6 +135,40 @@ export default function PronunciationModal({ text, speak, onClose, lang = "en-US
     typeof window !== "undefined" &&
     ("SpeechRecognition" in window || "webkitSpeechRecognition" in window);
 
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const playDing = useCallback(() => {
+    try {
+      if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
+      const ctx = audioCtxRef.current;
+      if (ctx.state === "suspended") ctx.resume();
+      const now = ctx.currentTime;
+
+      // "띵" — warm high note
+      const o1 = ctx.createOscillator();
+      const g1 = ctx.createGain();
+      o1.type = "sine";
+      o1.frequency.value = 784;
+      g1.gain.setValueAtTime(0.2, now);
+      g1.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+      o1.connect(g1).connect(ctx.destination);
+      o1.start(now);
+      o1.stop(now + 0.2);
+
+      // "똥" — soft lower note
+      const o2 = ctx.createOscillator();
+      const g2 = ctx.createGain();
+      o2.type = "sine";
+      o2.frequency.value = 523.25;
+      g2.gain.setValueAtTime(0.2, now + 0.12);
+      g2.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+      o2.connect(g2).connect(ctx.destination);
+      o2.start(now + 0.12);
+      o2.stop(now + 0.4);
+    } catch {
+      // AudioContext not available — skip silently
+    }
+  }, []);
+
   const clearAutoAdvanceTimer = () => {
     if (autoAdvanceTimerRef.current) {
       clearTimeout(autoAdvanceTimerRef.current);
@@ -229,27 +263,32 @@ export default function PronunciationModal({ text, speak, onClose, lang = "en-US
       }
 
       if (current >= origWords.length) {
-        // ✓ Full sentence matched — success
+        // ✓ Full sentence matched — pause recognition immediately
         phaseRef.current = "done"; // set before stop() so onend doesn't re-trigger
         recRef.current?.stop();
 
-        const newPass = passCountRef.current + 1;
-        passCountRef.current = newPass;
-        setPassCount(newPass);
+        // Delay success UI so the last chip renders green first
+        setTimeout(() => {
+          if (!mountedRef.current) return;
+          const newPass = passCountRef.current + 1;
+          passCountRef.current = newPass;
+          setPassCount(newPass);
+          playDing();
 
-        if (newPass >= REQUIRED_PASSES) {
-          phaseRef.current = "complete";
-          setPhase("complete");
-        } else {
-          setPhase("done");
-          autoAdvanceTimerRef.current = setTimeout(() => {
-            if (!mountedRef.current) return;
-            matchedCountRef.current = 0;
-            prevTransWordsRef.current = [];
-            setMatchedCount(0);
-            startListening();
-          }, AUTO_ADVANCE_MS);
-        }
+          if (newPass >= REQUIRED_PASSES) {
+            phaseRef.current = "complete";
+            setPhase("complete");
+          } else {
+            setPhase("done");
+            autoAdvanceTimerRef.current = setTimeout(() => {
+              if (!mountedRef.current) return;
+              matchedCountRef.current = 0;
+              prevTransWordsRef.current = [];
+              setMatchedCount(0);
+              startListening();
+            }, AUTO_ADVANCE_MS);
+          }
+        }, 500);
       }
     };
 
@@ -288,6 +327,7 @@ export default function PronunciationModal({ text, speak, onClose, lang = "en-US
       const dying = recRef.current;
       recRef.current = null; // invalidate so stale onend/onerror guards fire
       dying?.abort();
+      audioCtxRef.current?.close().catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

@@ -4,6 +4,124 @@
 > **Scope**: Full stack (backend + frontend + infra)
 > **Live**: https://lingua-rag.vercel.app
 
+## Session: 2026-03-13 17:46
+
+> **Context**: Vocabulary feature end-to-end wiring, highlight color swap (drag→blue, notes→yellow), vocab flash system, note panel UX unification
+
+### Done
+- feat(backend): Run `006_vocabulary.sql` migration via asyncpg — vocabulary table + indexes created
+- feat(frontend): Create Next.js API proxy routes for vocabulary CRUD (`vocabulary/route.ts`, `vocabulary/[vocabId]/route.ts`)
+- feat(frontend): Wire all vocabulary props to `<NoteSlidePanel>` in PdfViewer — `onVocabSave`, `onVocabUpdate`, `onVocabDelete`, `pdfLanguage`, `initialVocabWord`, `forceVocabTab`
+- refactor(frontend): Unify `showAll` state between memo and vocab tabs — removed `vocabShowAll`, both tabs share one toggle with localStorage persistence
+- refactor(frontend): Flatten vocab table in "show all" mode — single table with `p.` column instead of per-page grouping, row click navigates to page + flashes word
+- feat(frontend): Vocab word flash in PDF — dedicated red `vocabFlash` CSS animation, first occurrence only (tracked via `highlightCounterRef`), `source: "vocab"` flag separates from memo flash
+- fix(frontend): `customTextRenderer` not activating for vocab flash — added `flashHighlight?.source === "vocab"` to activation condition
+- feat(frontend): Duplicate word detection on save — amber warning banner with "save anyway" / "go to existing" options
+- refactor(frontend): Swap drag selection and note highlight colors — drag: yellow→blue, notes: blue→yellow, all CSS hover/flash animations updated
+- feat(frontend): `forceMemoTab` / `forceVocabTab` controls — popup note forces memo tab, popup vocab forces vocab tab, PDF highlight click forces memo tab
+- fix(frontend): Note panel stays open after saving from popup — removed auto-close, added `onClearHighlight` prop
+- refactor(frontend): Merge `isCreating` and regular memo input into unified block — shared `h-20` textarea, conditional quote block + cancel/save vs add button
+- fix(frontend): Prevent false note flash after saving — changed flash `useEffect` deps to `[flashKey]` only
+
+### Decisions
+- Vocab flash uses dedicated `vocab-highlight-flash` CSS class (red) separate from memo's `note-highlight-flash` (yellow)
+- `highlightCounterRef` reused for vocab flash occurrence tracking — first match only
+- Unified memo input block: same textarea for highlight-note and quick-memo modes
+
+### Next
+- [ ] Verify vocab CRUD end-to-end (add, edit, delete, persist across reload)
+- [ ] Vocab export feature (CSV/Anki format)
+- [ ] Code quality review of session changes
+
+---
+
+## Session: 2026-03-13 17:45
+
+> **Context**: UX polish sprint — search highlight sync, pronunciation success sound, LIBRARY_MAX removal, drag-and-drop reordering for sidebar items, i18n exploration
+
+### Done
+- fix(frontend): **Search highlight only shows when modal is open** — `customTextRenderer` now gated by `showSearch && searchQuery.trim()` instead of just `searchQuery.trim()`, so yellow highlights disappear when Spotlight is closed and reappear when reopened
+- feat(frontend): **Pronunciation success "ding-dong" sound** — Web Audio API with `AudioContext`, two sine oscillators (784 Hz + 523.25 Hz) for a warm two-tone chime on each successful pronunciation pass. Went through 3 iterations: sine/880 → triangle/1318 (too sharp) → sine/784 (warm). Cleanup on unmount via `audioCtxRef.current?.close()`
+- fix(frontend): **Last word chip turns green before success display** — wrapped success phase transition in `setTimeout(500)` so the final chip visually renders green before the pass count increments and success UI appears
+- fix(frontend): **PDF upload not appearing in sidebar** — root cause was `LIBRARY_MAX = 10` silently truncating `upsertLibraryMeta()` with `.slice(0, 10)`. New PDFs appended at index 11+ were immediately sliced off
+- chore(frontend): **Remove LIBRARY_MAX entirely** — server-side limits will handle subscription tiers; client-side localStorage/IDB have no practical cap. Removed constant, removed `.slice()` from server merge logic
+- fix(frontend): **Index status flash (green → yellow) on new upload** — new entries in `upsertLibraryMeta` now initialize with `indexStatus: "pending"` instead of `undefined`, preventing a brief "ready" flash
+- feat(frontend): **Drag-and-drop reordering for sidebar PDF list** — added `sortOrder` field to `PdfMeta`, `sortByOrder()` helper, `setLibraryMetaSortOrders()` for batch updates. Replaced all 17+ instances of `.sort((a,b) => a.addedAt - b.addedAt)` with `sortByOrder()`. Blue drop indicator lines (before/after) show during drag via `draggingChatIdRef` + `dropIndicator` state
+- feat(frontend): **Drag-and-drop reordering for folder PDFs** — `FolderPdfItem` in `SidebarTree.tsx` wrapped with relative div + drag handlers, same blue indicator UX
+- feat(frontend): **Drag-and-drop reordering for tree nodes (folders & pages)** — `TreeNodeRow` now detects edge zones (top/bottom 25%) for reorder vs middle zone (50%) for drop-into-folder. Added `handleReorderNode` in page.tsx that re-assigns `order` values for siblings. `draggingNodeIdRef` + `nodeDropIndicator` state for tracking
+- research(frontend): **Translation quality & i18n assessment** — current MyMemory API translates to Korean only (`langpair=xx|ko`). Identified ~25+ hardcoded Korean strings across 8 files. No i18n library installed. Recommended lightweight dictionary approach over next-intl for current scale
+
+### Decisions
+- Removed LIBRARY_MAX entirely: subscription-tier limits will be enforced server-side, matching ChatPDF's approach where IDB serves as client cache only
+- Drag-and-drop reorder uses `sortOrder` field (decoupled from `addedAt`) with integer re-indexing on drop, not fractional positioning
+- Tree node reorder uses 3-zone detection on folders (25% top = before, 50% middle = into folder, 25% bottom = after) to coexist with existing move-into-folder behavior
+- i18n approach: lightweight dictionary + `useLocale()` hook preferred over next-intl for ~25 strings (decision pending user confirmation on supported languages)
+
+### Next
+- [ ] i18n implementation — create locale dictionaries (ko, en at minimum), `useLocale()` hook, replace hardcoded Korean strings
+- [ ] Improve translation quality — replace MyMemory API with backend LLM-based translation for context-aware results
+- [ ] Add word definition/explanation feature to SelectionPopup (backend LLM endpoint)
+- [ ] Verify drag-and-drop reordering works correctly across edge cases (cross-folder drag, empty folders, rapid reorder)
+- [ ] OpenAI 500 repeated failure PDF investigation — log failing batch text content to identify problematic chunks
+- [ ] `activePdfName` → `activeChatId` full refactoring — currently only sidebar, need to convert `visitedPdfs`/`pdfIdMap` etc.
+- [ ] Phase 4: user acquisition (10-20 users) — Reddit r/languagelearning, Discord communities
+
+---
+
+## Session: 2026-03-13 17:45 (earlier)
+
+> **Context**: Chat panel cleanup (remove summary viewer), vocab TTS button, fix drag selection over note highlights
+
+### Done
+- refactor(frontend): **Remove summary viewer from ChatPanel** — deleted "요약 보기" toolbar button, summaries overlay (list + detail view), and all related state (`summaries`, `selectedSummary`, `showSummaries`, `reloadSummaries`, `handleDeleteSummary`, `DeleteIcon`). Removed unused imports (`ReactMarkdown`, `remarkGfm`, `remarkBreaks`, `ChatActionsCtx`, `MARKDOWN_COMPONENTS`, `SavedSummary`, `getSummaries`, `deleteSummary`, `formatSavedAt`). Simplified `handleSaveSummary` to just save + callback. Simplified `handleSend` (no more overlay close). Cleaned up auto-scroll effect dependency.
+- refactor(frontend): **Remove `showSummary` prop from InputBar** — prop, destructuring, and `showActionButtons` condition all cleaned up
+- feat(frontend): **Add TTS speak button to vocab table** — each word row now shows a small speaker icon next to the word. Added `speak` prop to `NoteSlidePanel`, passed from `PdfViewer`
+- fix(frontend): **Fix drag selection rects misaligned over note highlights** — `customTextRenderer` injects `<mark>` tags that split `<span>` text into multiple DOM text nodes. `computeRangeRects` used `range.startOffset`/`endOffset` directly, but these are relative to the individual text node, not the full span text. Added `resolveOffset()` using `TreeWalker` to compute the absolute offset within the span. Initial fix had a shortcut (`container.parentElement === sp → return offset`) that failed when the text node was a direct child of `<span>` but NOT the first child (e.g., text after a `<mark>` tag). Removed the shortcut so all cases go through TreeWalker.
+
+### Decisions
+- Always use TreeWalker for offset resolution: the "direct child = correct offset" shortcut is unsafe when `<mark>` tags split text into multiple sibling text nodes
+
+### Next
+- [ ] Verify drag selection fix across all boundary cases (start before mark → end inside, start inside → end after, spanning multiple marked spans)
+- [ ] OpenAI 500 repeated failure PDF investigation — log failing batch text content to identify problematic chunks
+- [ ] `activePdfName` → `activeChatId` full refactoring — currently only sidebar, need to convert `visitedPdfs`/`pdfIdMap` etc.
+- [ ] Phase 4: user acquisition (10-20 users) — Reddit r/languagelearning, Discord communities
+- [ ] Portfolio documentation: architecture diagram, ADR records, quantitative results
+
+---
+
+## Session: 2026-03-13 00:08
+
+> **Context**: PDF 뷰어 UI/UX 대폭 개선 — 헤더 제거, 하단 툴바 리디자인, Spotlight 검색, 사이드바 분할, 언어 선택 즉시 표시
+
+### Done
+- refactor(frontend): **PDF 헤더 제거** — 루트 헤더와 중복되는 PDF 헤더(파일명, 언어 선택, 검색, X 버튼) 전체 삭제
+- refactor(frontend): **Pan/Select 모드 제거** — `toolMode`, `isPanning`, `panStart` 상태 및 키보드 단축키(H/V), 스크롤 핸들러 정리
+- feat(frontend): **하단 플로팅 툴바 리디자인** — Pan/Select 버튼 → 언어 선택 + 페이지 내 검색 버튼으로 교체
+- feat(frontend): **Spotlight 검색 모달** — macOS Spotlight 스타일 UI, `Cmd+F`/버튼으로 열기, `Escape`/focus-out으로 닫기
+- feat(frontend): **Spotlight 드래그 이동** — `fixed` 포지셔닝으로 전체 뷰포트 이동 가능, `document` 레벨 mousemove/mouseup, `useRef`로 드래그 상태 관리
+- feat(frontend): **Spotlight 위치 영속성** — `localStorage`에 마지막 위치 저장, 새로고침 후 복원
+- feat(frontend): **검색 내용 유지** — 모달 닫을 때 `searchQuery`/`searchResults` 초기화 제거, 재열기 시 마지막 검색어 표시
+- feat(frontend): **사이드바 Chats/Folders 1:1 분할** — 퍼센트 기반 높이 분할 + 드래그 가능한 구분선, `localStorage` 영속
+- fix(frontend): **사이드바 분할 hydration mismatch** — `useState`에서 `localStorage` 읽기 → `useEffect`에서 복원으로 수정 (SSR 안전)
+- feat(frontend): **새 PDF 업로드 시 즉시 언어 선택 모달** — `pdfServerId` 도착 전에 모달 표시, 서버 ID 도착 후 deferred 저장
+- fix(frontend): **폴더 드래그 오버레이 가시성** — `bg-blue-100/50` → `bg-blue-200/70`으로 진하게 변경
+- fix(frontend): **Spotlight X 버튼 → focus out 미동작** — `requestAnimationFrame`으로 focus 복원 지연, React 리렌더 후 input에 focus 보장
+
+### Decisions
+- PDF 헤더 완전 제거: 루트 헤더와 기능 중복 해소, 하단 툴바로 필수 기능 통합
+- `fixed` vs `absolute` 포지셔닝: Spotlight을 PDF 컨테이너가 아닌 전체 뷰포트 범위로 이동 가능하게
+- `onBlur` vs `mouseLeave`: Spotlight 닫기를 focus 기반으로 전환하여 키보드/마우스 모두 자연스러운 UX
+
+### Next
+- [ ] Spotlight X 버튼 → focus out 닫힘 검증 (`requestAnimationFrame` 수정 적용 확인)
+- [ ] OpenAI 500 반복 실패 PDF 원인 조사 — 실패 배치의 텍스트 내용 로깅하여 문제 청크 특정
+- [ ] `activePdfName` → `activeChatId` 전면 리팩터링 — 현재 사이드바만 적용, `visitedPdfs`/`pdfIdMap` 등 나머지도 chatId 기반 전환
+- [ ] Phase 4: user acquisition (10-20 users) — Reddit r/languagelearning, Discord communities
+- [ ] Portfolio documentation: architecture diagram, ADR records, quantitative results
+
+---
+
 ## Session: 2026-03-12 23:16
 
 > **Context**: PDF 관리 UX 버그 수정 — 인덱싱 상태 폴링, 중복 key, 삭제 cascade, 검색 하이라이트, 대용량 업로드

@@ -8,6 +8,8 @@ export interface Annotation {
   y_pct: number;
   text: string;
   color: string;
+  type: "sticky" | "highlight";
+  highlighted_text: string | null;
   created_at: string;
 }
 
@@ -24,11 +26,16 @@ export async function createAnnotation(
   yPct: number,
   text: string,
   color: string,
+  type: "sticky" | "highlight" = "sticky",
+  highlightedText?: string,
 ): Promise<Annotation | null> {
   const res = await fetch(`/api/pdfs/${pdfId}/annotations`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ page_num: pageNum, x_pct: xPct, y_pct: yPct, text, color }),
+    body: JSON.stringify({
+      page_num: pageNum, x_pct: xPct, y_pct: yPct, text, color,
+      type, highlighted_text: highlightedText ?? null,
+    }),
   });
   if (!res.ok) return null;
   return res.json();
@@ -65,6 +72,64 @@ export async function moveAnnotation(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ x_pct: xPct, y_pct: yPct }),
   });
+  return res.ok;
+}
+
+// ---------------------------------------------------------------------------
+// Vocabulary
+// ---------------------------------------------------------------------------
+
+export interface VocabEntry {
+  id: string;
+  pdf_id: string;
+  page_num: number;
+  word: string;
+  context: string | null;
+  meaning: string | null;
+  language: string | null;
+  created_at: string;
+}
+
+export async function fetchVocabulary(pdfId: string): Promise<VocabEntry[]> {
+  const res = await fetch(`/api/pdfs/${pdfId}/vocabulary`);
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function createVocabulary(
+  pdfId: string,
+  pageNum: number,
+  word: string,
+  context?: string | null,
+  meaning?: string | null,
+  language?: string | null,
+): Promise<VocabEntry | null> {
+  const res = await fetch(`/api/pdfs/${pdfId}/vocabulary`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ page_num: pageNum, word, context, meaning, language }),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function updateVocabulary(
+  pdfId: string,
+  vocabId: string,
+  word?: string,
+  meaning?: string,
+): Promise<VocabEntry | null> {
+  const res = await fetch(`/api/pdfs/${pdfId}/vocabulary/${vocabId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ word, meaning }),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function deleteVocabulary(pdfId: string, vocabId: string): Promise<boolean> {
+  const res = await fetch(`/api/pdfs/${pdfId}/vocabulary/${vocabId}`, { method: "DELETE" });
   return res.ok;
 }
 

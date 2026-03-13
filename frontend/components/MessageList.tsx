@@ -322,12 +322,14 @@ function AssistantActionBar({
   feedback,
   onFeedback,
   onRetry,
+  onSave,
 }: {
   content: string;
   messageId?: string;
   feedback?: "up" | "down" | null;
   onFeedback?: (id: string, f: "up" | "down" | null) => void;
   onRetry?: (id: string) => void;
+  onSave?: (content: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
   const btnBase = "h-8 w-8 rounded-md flex items-center justify-center transition-colors";
@@ -352,6 +354,18 @@ function AssistantActionBar({
       >
         {copied ? <IconCheck /> : <IconCopy />}
       </button>
+      {/* Save */}
+      {onSave && (
+        <button
+          onClick={() => onSave(content)}
+          title="저장"
+          className={`${btnBase} text-gray-400 hover:text-gray-700 hover:bg-gray-100`}
+        >
+          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
+          </svg>
+        </button>
+      )}
       {/* Thumbs up */}
       {messageId && onFeedback && (
         <button
@@ -480,55 +494,25 @@ function SaveSummaryButton({
   content: string;
   onSave?: (c: string) => void;
 }) {
-  const [saved, setSaved] = useState(false);
   return (
     <button
-      onClick={() => {
-        onSave?.(content);
-        setSaved(true);
-        setTimeout(() => setSaved(false), 2000);
-      }}
-      className={`mt-2 flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg border transition-colors ${
-        saved
-          ? "border-green-200 bg-green-50 text-green-600"
-          : "border-gray-200 text-gray-500 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-600"
-      }`}
+      onClick={() => onSave?.(content)}
+      className="mt-2 flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg border border-gray-200 text-gray-500 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-600 transition-colors"
     >
-      {saved ? (
-        <>
-          <svg
-            className="w-3 h-3"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={2}
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M5 13l4 4L19 7"
-            />
-          </svg>
-          저장됨
-        </>
-      ) : (
-        <>
-          <svg
-            className="w-3 h-3"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={2}
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z"
-            />
-          </svg>
-          요약 저장
-        </>
-      )}
+      <svg
+        className="w-3 h-3"
+        fill="none"
+        viewBox="0 0 24 24"
+        stroke="currentColor"
+        strokeWidth={2}
+      >
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z"
+        />
+      </svg>
+      요약 저장
     </button>
   );
 }
@@ -542,6 +526,7 @@ interface MessageListProps {
   onInject: (text: string) => void;
   onPractice: (text: string) => void;
   onSaveSummary?: (content: string) => void;
+  onSaveResponse?: (content: string) => void;
   onFeedback?: (messageId: string, feedback: "up" | "down" | null) => void;
   onRetry?: (messageId: string) => void;
   onEdit?: (messageId: string, content: string) => void;
@@ -553,6 +538,7 @@ export default function MessageList({
   onInject,
   onPractice,
   onSaveSummary,
+  onSaveResponse,
   onFeedback,
   onRetry,
   onEdit,
@@ -813,6 +799,7 @@ export default function MessageList({
                       feedback={msg.feedback}
                       onFeedback={onFeedback}
                       onRetry={onRetry}
+                      onSave={onSaveResponse}
                     />
                   )}
                 </div>

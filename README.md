@@ -5,7 +5,7 @@
 ## 주요 기능
 
 ### AI 튜터 채팅
-- **RAG 기반 Q&A** — 업로드한 PDF 교재 내용을 근거로 답변 (pgvector cosine 유사도 검색)
+- **RAG 기반 Q&A** — 업로드한 PDF 교재 내용을 근거로 답변 (하이브리드 검색: pgvector cosine + BM25 tsvector → RRF 융합)
 - **실시간 스트리밍** — Claude SSE 스트리밍으로 토큰 단위 실시간 응답
 - **페이지 컨텍스트** — "이 페이지" 키워드 감지 시 현재 보고 있는 페이지 텍스트를 자동 전달
 - **대화 이력 유지** — PDF별로 대화 스레드 분리, 최근 10개 메시지 히스토리 주입
@@ -17,21 +17,32 @@
 - **서버 기반 PDF 관리** — Supabase Storage 업로드/다운로드, 메타데이터 DB 저장
 - **주석 (Sticky Notes)** — 페이지 위 클릭으로 메모 추가, 드래그 이동, 색상 변경
 - **마지막 페이지 기억** — PDF 재진입 시 마지막으로 본 페이지에서 이어보기
-- **텍스트 선택 팝업** — PDF 텍스트 드래그 시 "AI에게 질문" / "TTS 발음 듣기" 팝업
+- **텍스트 선택 팝업** — PDF 텍스트 드래그 시 액션 팝업 (소리, 복사, 번역, 질문하기, 단어장, 메모, 연습)
+
+### 단어장
+- **단어 추가** — 텍스트 선택 팝업에서 "단어장" 클릭으로 즉시 추가
+- **단어장 패널** — PDF별 단어 목록, 페이지별 필터링, TTS 발음 재생
+- **중복 감지** — 이미 등록된 단어 추가 시 경고 + 기존 단어로 이동 옵션
+- **단어 플래시** — 단어장 항목 클릭 시 PDF 해당 위치 빨간색 깜빡임
 
 ### 다국어 지원
 - **범용 언어 튜터** — PDF별로 학습 언어 설정 (독일어, 영어, 일본어 등 제한 없음)
 - **TTS 발음 재생** — Web Speech API 기반 다국어 발음, 단어/문장 선택 재생
 - **발음 모달** — 선택한 텍스트의 발음을 반복 청취
+- **인라인 번역** — MyMemory API 기반 선택 텍스트 한국어 번역
 
 ### 학습 관리
-- **노트 저장** — 채팅 중 중요한 응답을 노트로 저장, PDF별 분류
-- **요약 저장** — AI 학습 요약을 별도 저장, 나중에 복습
-- **PDF 사이드바** — 업로드한 PDF 목록에서 빠르게 전환
+- **노트 패널** — PDF 페이지별 메모 슬라이드 패널, 전체/페이지 필터
+- **응답 저장** — 채팅 응답의 북마크 버튼으로 노트 또는 페이지에 저장
+- **요약 저장 모달** — 탭 UI로 "현재 페이지 노트에 저장" / "페이지에 저장" 선택
+- **폴더/페이지 트리** — 사이드바에서 폴더 생성, 드래그앤드롭 정렬, 페이지 뷰어
+- **PDF 사이드바** — 업로드한 PDF 목록 + 컨텍스트 메뉴 (이름 변경, 삭제)
+- **사용 통계** — 메시지 수, 토큰 사용량, RAG 적중률, 비용 추정 (`/api/stats`)
 
 ### 인증 및 보안
 - **Google OAuth** — Supabase Auth 기반 소셜 로그인
 - **JWT 프록시** — 브라우저 → Next.js API Route → FastAPI, JWT는 서버 사이드에서만 전달
+- **게스트 모드** — 비로그인 PDF 업로드 (100페이지, IP당 3회/일) + 채팅 (대화 비저장)
 
 ## 아키텍처
 
@@ -68,8 +79,10 @@ graph TB
         end
         subgraph Routers["Routers"]
             ChatRouter["POST /api/chat"]
-            PdfRouter["GET/POST /api/pdfs"]
+            PdfRouter["GET/POST /api/pdfs\n(annotations, vocabulary)"]
+            GuestRouter["POST /api/guest\n(upload, chat)"]
             ConvRouter["GET /api/conversations"]
+            StatsRouter["GET /api/stats"]
             HealthRouter["GET /api/health"]
         end
         Lock["asyncio.Lock\n(LRU · 1,000 유저 캡)\n동시 요청 직렬화"]
@@ -79,7 +92,8 @@ graph TB
         PdfFiles["pdf_files\n(id, user_id, name, language)"]
         Conversations["conversations\n(user_id, pdf_id)"]
         Messages["messages"]
-        Chunks["document_chunks\n(pgvector · pdf_id scope)"]
+        Chunks["document_chunks\n(pgvector + tsvector · pdf_id scope)"]
+        Vocabulary["vocabulary\n(word, context, meaning)"]
     end
 
     Claude["Claude claude-sonnet-4-6\n(Anthropic API)"]
@@ -96,7 +110,7 @@ graph TB
     ChatRouter --> EmbedSvc
     EmbedSvc -->|"embed(message)"| OpenAI
     OpenAI -->|"vector(1536)"| EmbedSvc
-    EmbedSvc -->|"cosine search\n(pdf_id scope)"| Chunks
+    EmbedSvc -->|"hybrid search\n(vector + BM25 → RRF)"| Chunks
     Chunks -->|"top-3 chunks"| ChatRouter
     ChatRouter --> ClaudeSvc
     ChatRouter <--> Conversations
@@ -174,7 +188,7 @@ sequenceDiagram
 
         API->>OAI: embed(message) → vector(1536)
         OAI-->>API: embedding vector
-        API->>DB: pgvector cosine search<br/>(pdf_id scope, max_distance=0.7, top-3)
+        API->>DB: hybrid search<br/>(vector cosine + BM25 tsvector → RRF, top-3)
         DB-->>API: RAG chunks (교재 원문)
 
         API->>LLM: streaming API 호출<br/>(system prompt + RAG chunks + history + message)
@@ -240,7 +254,20 @@ erDiagram
         INTEGER chunk_index
         TEXT content
         VECTOR_1536 embedding "text-embedding-3-small"
+        TSVECTOR tsv "BM25 full-text search"
         JSONB metadata "page_start, page_end"
+        TIMESTAMPTZ created_at
+    }
+
+    vocabulary {
+        UUID id PK
+        UUID user_id
+        TEXT pdf_id
+        INTEGER page_num
+        TEXT word
+        TEXT context
+        TEXT meaning
+        TEXT language
         TIMESTAMPTZ created_at
     }
 
@@ -279,6 +306,7 @@ erDiagram
     pdf_files ||--o{ summaries : "1 PDF : N 요약"
     pdf_files ||--o{ notes : "1 PDF : N 노트"
     pdf_files ||--o{ pdf_annotations : "1 PDF : N 주석"
+    pdf_files ||--o{ vocabulary : "1 PDF : N 단어"
     conversations ||--o{ messages : "1 대화 : N 메시지"
 ```
 
@@ -290,7 +318,7 @@ erDiagram
 | Auth | Supabase Auth (Google OAuth, JWT ES256) |
 | Backend | FastAPI, Python 3.13, asyncpg |
 | AI | Claude claude-sonnet-4-6 (Anthropic SSE Streaming) |
-| RAG | OpenAI `text-embedding-3-small` + pgvector (cosine 유사도 검색) |
+| RAG | OpenAI `text-embedding-3-small` + pgvector cosine + BM25 tsvector → RRF 하이브리드 검색 |
 | DB | PostgreSQL (pgcrypto, pgvector, asyncpg) |
 | Storage | Supabase Storage (PDF 파일) |
 | Deploy | Vercel (Frontend) + Render (Backend + DB) |
@@ -298,11 +326,12 @@ erDiagram
 ## 유저 플로우
 
 ```
-/login  →  Google OAuth  →  /chat  (PDF 선택 + 채팅)
+게스트:  /chat  →  PDF 업로드 (100p, 3회/일)  →  채팅 (대화 비저장)
+회원:    /login  →  Google OAuth  →  /chat  →  전체 기능
 ```
 
-- `/login` — Google 로그인, 미인증 시 모든 경로에서 리다이렉트
-- `/chat` — PDF 목록 사이드바 + PDF 뷰어 + 채팅 패널, TTS 발음 재생, 주석/요약/노트 관리
+- `/login` — Google 로그인, 미인증 시 게스트 모드로 제한적 이용
+- `/chat` — PDF 사이드바 + PDF 뷰어 + 채팅 패널, TTS/번역, 주석/단어장/노트 관리
 
 ## 프로젝트 구조
 
@@ -315,7 +344,7 @@ lingua-rag/
 │   │   ├── db/            # asyncpg 커넥션 풀, 레포지토리
 │   │   ├── deps/          # auth.py — Supabase JWKS JWT 검증
 │   │   ├── models/        # Pydantic v2 스키마
-│   │   ├── routers/       # chat, conversations, pdfs, summaries, notes 엔드포인트
+│   │   ├── routers/       # chat, conversations, pdfs, summaries, notes, guest, stats 엔드포인트
 │   │   ├── services/      # ClaudeService (SSE), EmbeddingService (OpenAI)
 │   │   └── main.py        # FastAPI 앱, CORS, lifespan
 │   ├── migrations/        # DB 마이그레이션 SQL
@@ -329,26 +358,29 @@ lingua-rag/
     │   ├── api/            # Next.js → FastAPI 프록시 (JWT 주입)
     │   │   ├── chat/       # POST — SSE 스트림 프록시
     │   │   ├── conversations/  # GET — 대화 목록/메시지
-    │   │   ├── pdfs/       # PDF 업로드/목록/주석/언어 설정
+    │   │   ├── pdfs/       # PDF 업로드/목록/주석/단어장/언어 설정
     │   │   ├── summaries/  # 학습 요약 CRUD
     │   │   ├── notes/      # 노트 CRUD
+    │   │   ├── guest/      # 게스트 PDF 업로드/채팅
     │   │   └── health/     # GET — Render cold-start 폴링
     │   ├── auth/callback/  # Supabase OAuth 콜백 처리
     │   ├── login/          # Google 로그인 페이지
     │   ├── chat/           # 메인 채팅 페이지 (사이드바 + PDF 뷰어 + ChatPanel)
     │   └── page.tsx        # → /chat 리다이렉트
-    ├── components/         # ChatPanel, MessageList, PdfViewer, InputBar, PronunciationModal
+    ├── components/         # ChatPanel, MessageList, PdfViewer, InputBar, NoteSlidePanel,
+    │                       # SidebarTree, PageViewer, SummarySaveModal, PronunciationModal
     ├── hooks/
     │   ├── useChat.ts      # SSE 스트리밍, 메시지 큐
     │   ├── useBackendHealth.ts  # Render cold-start 감지
     │   └── useTTS.ts       # Web Speech API (다국어 발음)
     ├── lib/
     │   ├── supabase/       # client.ts, server.ts (SSR)
-    │   ├── types.ts        # Message, SavedSummary, SavedNote 타입
+    │   ├── types.ts        # Message, SavedSummary, SavedNote, VocabEntry 타입
     │   ├── pdfLibrary.ts   # PDF 업로드/목록 관리
-    │   ├── annotations.ts  # PDF 주석 CRUD
+    │   ├── annotations.ts  # PDF 주석/단어장 CRUD
     │   ├── summaries.ts    # 학습 요약 API
-    │   └── notes.ts        # 노트 API
+    │   ├── notes.ts        # 노트 API
+    │   └── tree.ts         # 폴더/페이지 트리 (localStorage)
     ├── middleware.ts        # Supabase 세션 검증 → 미인증 시 /login
     └── .env.example
 ```
@@ -468,16 +500,20 @@ npm run dev
 
 ## API 엔드포인트
 
-모든 엔드포인트는 `Authorization: Bearer <Supabase JWT>` 헤더 필요.
+인증 필요 (`Authorization: Bearer <Supabase JWT>`) 엔드포인트와 게스트 엔드포인트로 구분.
+
+**인증 필요**
 
 | Method | Path | 설명 |
 |--------|------|------|
-| `POST` | `/api/chat` | SSE 스트리밍 Q&A |
+| `POST` | `/api/chat` | SSE 스트리밍 Q&A (하이브리드 RAG) |
 | `GET` | `/api/conversations` | 현재 유저의 대화 목록 |
 | `GET` | `/api/conversations/{id}/messages` | 대화 메시지 조회 |
 | `GET/POST` | `/api/pdfs` | PDF 목록 조회 / 업로드 |
 | `GET/DELETE` | `/api/pdfs/{id}` | PDF 조회 / 삭제 |
 | `GET/POST/PUT/DELETE` | `/api/pdfs/{id}/annotations` | PDF 주석 CRUD |
+| `GET/POST` | `/api/pdfs/{id}/vocabulary` | 단어장 목록 / 추가 |
+| `PATCH/DELETE` | `/api/pdfs/{id}/vocabulary/{vocabId}` | 단어 수정 / 삭제 |
 | `PATCH` | `/api/pdfs/{id}/language` | PDF 학습 언어 설정 |
 | `GET/PATCH` | `/api/pdfs/{id}/last-page` | 마지막 읽은 페이지 |
 | `GET/POST` | `/api/summaries` | 학습 요약 목록 / 저장 |
@@ -486,7 +522,15 @@ npm run dev
 | `DELETE` | `/api/notes/{id}` | 노트 삭제 |
 | `PATCH` | `/api/messages/{id}/feedback` | 메시지 피드백 (up/down) |
 | `DELETE` | `/api/messages/{id}/truncate` | 메시지 이후 삭제 (재시도) |
+| `GET` | `/api/stats` | 사용 통계 (메시지, 토큰, 비용 추정) |
 | `GET` | `/api/health` | 헬스 체크 (DB 연결 포함) |
+
+**게스트 (인증 불필요)**
+
+| Method | Path | 설명 |
+|--------|------|------|
+| `POST` | `/api/guest/pdfs/upload` | 게스트 PDF 업로드 (100p, IP당 3회/일) |
+| `POST` | `/api/guest/chat` | 게스트 SSE 채팅 (대화 비저장) |
 
 ## 설계 결정
 
@@ -502,7 +546,9 @@ npm run dev
 
 **동시성 제어**: 같은 유저의 중복 요청을 `asyncio.Lock` (LRU OrderedDict, 1,000 유저 캡)으로 직렬화.
 
-**RAG 파이프라인**: 사용자 메시지를 `text-embedding-3-small`로 임베딩 → pgvector cosine 유사도 검색 (max_distance=0.7, top-3) → 매칭된 교재 원문을 Claude 시스템 프롬프트에 주입. `pdf_id`로 검색 범위를 해당 PDF로 제한.
+**하이브리드 RAG 파이프라인**: 사용자 메시지를 `text-embedding-3-small`로 임베딩 → (1) pgvector cosine 유사도 검색 + (2) BM25 tsvector 키워드 검색 → Reciprocal Rank Fusion (K=60)으로 두 결과 융합 → top-3 청크를 Claude 시스템 프롬프트에 주입. `pdf_id`로 검색 범위 제한. 하이브리드 검색 실패 시 vector-only fallback.
+
+**게스트 모드**: sentinel `user_id`(`00000000-...`)로 게스트 데이터 격리. IP 기반 rate limit (3 업로드/일, 100페이지 제한). 채팅 응답은 스트리밍되지만 DB에 저장하지 않음.
 
 **PDF 저장**: Supabase Storage에 저장. 메타데이터(이름, 크기, 페이지 수, 언어)는 PostgreSQL `pdf_files` 테이블에 관리.
 

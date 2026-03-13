@@ -20,7 +20,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from app.core.storage import object_path, storage_delete, storage_download, storage_signed_url, storage_upload
-from app.db.repositories import AnnotationRepository, PdfFileRepository
+from app.db.repositories import AnnotationRepository, PdfFileRepository, VocabularyRepository
 from app.deps.auth import get_current_user
 from app.services.indexing_service import index_pdf
 
@@ -30,14 +30,17 @@ router = APIRouter(prefix="/pdfs")
 
 ann_repo = AnnotationRepository()
 pdf_repo = PdfFileRepository()
+vocab_repo = VocabularyRepository()
 
 
 class AnnotationCreate(BaseModel):
     page_num: int
-    x_pct: float
-    y_pct: float
+    x_pct: float = 0.0
+    y_pct: float = 0.0
     text: str
     color: str = "yellow"
+    type: str = "sticky"  # 'sticky' | 'highlight'
+    highlighted_text: str | None = None
 
 
 class AnnotationUpdate(BaseModel):
@@ -310,7 +313,17 @@ async def create_annotation(
     body: AnnotationCreate,
     user: Annotated[UUID, Depends(get_current_user)],
 ):
-    return await ann_repo.create(user, pdf_id, body.page_num, body.x_pct, body.y_pct, body.text, body.color)
+    return await ann_repo.create(
+        user,
+        pdf_id,
+        body.page_num,
+        body.x_pct,
+        body.y_pct,
+        body.text,
+        body.color,
+        ann_type=body.type,
+        highlighted_text=body.highlighted_text,
+    )
 
 
 @router.patch("/{pdf_id}/annotations/{ann_id}")
@@ -342,4 +355,63 @@ async def delete_annotation(
     deleted = await ann_repo.delete(user, ann_id)
     if not deleted:
         raise HTTPException(404, "Annotation not found")
+    return {"ok": True}
+
+
+# ── Vocabulary endpoints ──────────────────────────────────────────────────────
+
+class VocabCreate(BaseModel):
+    page_num: int
+    word: str
+    context: str | None = None
+    meaning: str | None = None
+    language: str | None = None
+
+class VocabUpdate(BaseModel):
+    word: str | None = None
+    meaning: str | None = None
+
+
+@router.get("/{pdf_id}/vocabulary")
+async def list_vocabulary(
+    pdf_id: str,
+    user: Annotated[UUID, Depends(get_current_user)],
+    page_num: int | None = None,
+):
+    if page_num is not None:
+        return await vocab_repo.list_by_page(user, pdf_id, page_num)
+    return await vocab_repo.list_all(user, pdf_id)
+
+
+@router.post("/{pdf_id}/vocabulary", status_code=201)
+async def create_vocabulary(
+    pdf_id: str,
+    body: VocabCreate,
+    user: Annotated[UUID, Depends(get_current_user)],
+):
+    return await vocab_repo.create(user, pdf_id, body.page_num, body.word, body.context, body.meaning, body.language)
+
+
+@router.patch("/{pdf_id}/vocabulary/{vocab_id}")
+async def update_vocabulary(
+    pdf_id: str,
+    vocab_id: UUID,
+    body: VocabUpdate,
+    user: Annotated[UUID, Depends(get_current_user)],
+):
+    result = await vocab_repo.update(user, vocab_id, word=body.word, meaning=body.meaning)
+    if not result:
+        raise HTTPException(404, "Vocabulary entry not found")
+    return result
+
+
+@router.delete("/{pdf_id}/vocabulary/{vocab_id}")
+async def delete_vocabulary(
+    pdf_id: str,
+    vocab_id: UUID,
+    user: Annotated[UUID, Depends(get_current_user)],
+):
+    deleted = await vocab_repo.delete(user, vocab_id)
+    if not deleted:
+        raise HTTPException(404, "Vocabulary entry not found")
     return {"ok": True}

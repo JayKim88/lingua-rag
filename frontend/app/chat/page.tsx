@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import ChatPanel from "@/components/ChatPanel";
 import SaveToPageModal, { type SaveResult } from "@/components/SaveToPageModal";
+import SummarySaveModal, { type PageSaveResult } from "@/components/SummarySaveModal";
 import { useBackendHealth } from "@/hooks/useBackendHealth";
 import { useTTS } from "@/hooks/useTTS";
 import { createClient } from "@/lib/supabase/client";
@@ -17,10 +18,13 @@ import {
   removeLibraryMeta,
   setLibraryMetaPdfServerId,
   setLibraryMetaFolderId,
+  toggleLibraryMetaBookmark,
   upsertLibraryMeta,
   updateLibraryIndexStatus,
   generateChatId,
   getSessionMeta,
+  sortByOrder,
+  setLibraryMetaSortOrders,
   LIBRARY_META_KEY,
   LIBRARY_CURRENT_KEY,
   type PdfMeta,
@@ -90,8 +94,8 @@ type ViewMode = "both" | "pdf" | "chat";
 function ChatContent() {
   const router = useRouter();
   const [initialized, setInitialized] = useState(false);
-  const [visitedPdfs, setVisitedPdfs] = useState<Set<string>>(new Set());
-  // pdfId is fixed at the moment a PDF is first visited — prevents mid-session drift
+  const [visitedChatIds, setVisitedChatIds] = useState<Set<string>>(new Set());
+  // Maps chatId → server pdfServerId (fixed at first visit to prevent mid-session drift)
   const pdfIdMap = useRef<Map<string, string>>(new Map());
   const [viewMode, setViewMode] = useState<ViewMode>("chat");
   const [showSidebar, setShowSidebar] = useState(true);
@@ -102,6 +106,9 @@ function ChatContent() {
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [pdfLibrary, setPdfLibrary] = useState<PdfMeta[]>([]);
   const [pdfServerId, setPdfServerId] = useState<string | null>(null);
+  const [isRenamingTitle, setIsRenamingTitle] = useState(false);
+  const [renameDraft, setRenameDraft] = useState("");
+  const renameTitleRef = useRef<HTMLInputElement>(null);
   const modalFileInputRef = useRef<HTMLInputElement>(null);
 
   // Folders / tree state
@@ -116,6 +123,9 @@ function ChatContent() {
   const [showSaveToPageModal, setShowSaveToPageModal] = useState(false);
   const [saveToPageContent, setSaveToPageContent] = useState("");
 
+  // Summary save modal state (tabbed: note + page)
+  const [summarySaveContent, setSummarySaveContent] = useState<string | null>(null);
+
   // PDF context menu + modals (all keyed by chatId)
   const [contextMenuPdf, setContextMenuPdf] = useState<string | null>(null); // chatId of PDF with open menu
   const [contextMenuPos, setContextMenuPos] = useState<{
@@ -129,6 +139,8 @@ function ChatContent() {
   const [confirmResetPdf, setConfirmResetPdf] = useState<string | null>(null); // chatId
   const [isDraggingItem, setIsDraggingItem] = useState(false); // true when any PDF/node is being dragged
   const [chatResetKey, setChatResetKey] = useState(0); // increment to force ChatPanel remount
+  const [dropIndicator, setDropIndicator] = useState<{ chatId: string; position: "before" | "after" } | null>(null);
+  const draggingChatIdRef = useRef<string | null>(null);
 
   const [user, setUser] = useState<{ name: string; email: string } | null>(
     null,
@@ -161,6 +173,7 @@ function ChatContent() {
 
   // Sidebar section split (Chats vs Folders) — percentage for Chats section
   const [chatsSplitPct, setChatsSplitPct] = useState(50);
+  const [isSplitDragging, setIsSplitDragging] = useState(false);
   const isSplitResizing = useRef(false);
   const chatsSplitPctRef = useRef(50);
   const splitContainerRef = useRef<HTMLDivElement>(null);
@@ -208,7 +221,7 @@ function ChatContent() {
     }
 
     // Load PDF library (sorted by registration order asc) and tree
-    const library = getLibraryMeta().sort((a, b) => a.addedAt - b.addedAt);
+    const library = sortByOrder(getLibraryMeta());
     setPdfLibrary(library);
     setTreeNodes(loadTree());
 
@@ -225,12 +238,12 @@ function ChatContent() {
         localStorage.setItem(LIBRARY_CURRENT_KEY, lastMeta.chatId!);
       }
       pdfIdMap.current.set(
-        lastMeta.name,
-        `${lastMeta.pdfServerId ?? lastMeta.name}`,
+        lastMeta.chatId!,
+        `${lastMeta.pdfServerId ?? lastMeta.chatId!}`,
       );
       setActivePdfName(lastMeta.name);
       setActiveChatId(lastMeta.chatId ?? null);
-      setVisitedPdfs(new Set([lastMeta.name]));
+      setVisitedChatIds(new Set([lastMeta.chatId!]));
       if (!savedViewMode || savedViewMode === "chat") setViewMode("both");
     }
 
@@ -281,7 +294,7 @@ function ChatContent() {
         }
         // Clear guest session data
         sessionStorage.removeItem("guest-tab-pdfs");
-        setPdfLibrary(getLibraryMeta().sort((a, b) => a.addedAt - b.addedAt));
+        setPdfLibrary(sortByOrder(getLibraryMeta()));
       })();
     }
 
@@ -333,7 +346,7 @@ function ChatContent() {
 
           if (changed) {
             setPdfLibrary(
-              getLibraryMeta().sort((a, b) => a.addedAt - b.addedAt),
+              sortByOrder(getLibraryMeta()),
             );
           }
 
@@ -377,7 +390,7 @@ function ChatContent() {
     // Small delay to let PdfViewer save the file to library first
     const t = setTimeout(
       () =>
-        setPdfLibrary(getLibraryMeta().sort((a, b) => a.addedAt - b.addedAt)),
+        setPdfLibrary(sortByOrder(getLibraryMeta())),
       300,
     );
     return () => clearTimeout(t);
@@ -406,7 +419,7 @@ function ChatContent() {
           serverPdfs.map((sp) => [sp.name, sp.index_status ?? "pending"]),
         );
         // Re-read from localStorage to pick up entries added since last render
-        const fresh = getLibraryMeta().sort((a, b) => a.addedAt - b.addedAt);
+        const fresh = sortByOrder(getLibraryMeta());
         let changed = false;
         const next = fresh.map((m) => {
           const s = statusMap2.get(m.name);
@@ -514,6 +527,7 @@ function ChatContent() {
   const onSplitDividerMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     isSplitResizing.current = true;
+    setIsSplitDragging(true);
   }, []);
 
   useEffect(() => {
@@ -553,6 +567,7 @@ function ChatContent() {
       }
       if (isSplitResizing.current) {
         isSplitResizing.current = false;
+        setIsSplitDragging(false);
         localStorage.setItem(
           "lingua_sidebar_split",
           String(chatsSplitPctRef.current),
@@ -608,7 +623,7 @@ function ChatContent() {
       });
       if (changed) {
         localStorage.setItem(LIBRARY_META_KEY, JSON.stringify(updatedLib));
-        setPdfLibrary(updatedLib.sort((a, b) => a.addedAt - b.addedAt));
+        setPdfLibrary(sortByOrder(updatedLib));
       }
     },
     [treeNodes],
@@ -626,6 +641,33 @@ function ChatContent() {
               }
             : n,
         );
+        saveTree(updated);
+        return updated;
+      });
+    },
+    [],
+  );
+
+  const handleReorderNode = useCallback(
+    (draggedId: string, targetId: string, position: "before" | "after") => {
+      if (draggedId === targetId) return;
+      setTreeNodes((prev) => {
+        const dragged = prev.find((n) => n.id === draggedId);
+        const target = prev.find((n) => n.id === targetId);
+        if (!dragged || !target) return prev;
+        const parentId = target.parentId;
+        const siblings = prev
+          .filter((n) => n.parentId === parentId && n.id !== draggedId)
+          .sort((a, b) => a.order - b.order || a.createdAt - b.createdAt);
+        const targetIdx = siblings.findIndex((n) => n.id === targetId);
+        const insertIdx = position === "before" ? targetIdx : targetIdx + 1;
+        siblings.splice(insertIdx, 0, { ...dragged, parentId });
+        const orderMap = new Map(siblings.map((n, i) => [n.id, i]));
+        const updated = prev.map((n) => {
+          if (n.id === draggedId) return { ...n, parentId, order: orderMap.get(n.id) ?? n.order };
+          const newOrder = orderMap.get(n.id);
+          return newOrder !== undefined ? { ...n, order: newOrder } : n;
+        });
         saveTree(updated);
         return updated;
       });
@@ -655,21 +697,9 @@ function ChatContent() {
         m.chatId === chatId ? { ...m, name: newName } : m,
       );
       localStorage.setItem(LIBRARY_META_KEY, JSON.stringify(updated));
-      setPdfLibrary(updated.sort((a, b) => a.addedAt - b.addedAt));
+      setPdfLibrary(sortByOrder(updated));
 
-      const oldPdfId = pdfIdMap.current.get(meta.name);
-      if (oldPdfId) {
-        pdfIdMap.current.delete(meta.name);
-        pdfIdMap.current.set(newName, oldPdfId);
-      }
-      if (activePdfName === meta.name) setActivePdfName(newName);
-      setVisitedPdfs((prev) => {
-        if (!prev.has(meta.name)) return prev;
-        const s = new Set(prev);
-        s.delete(meta.name);
-        s.add(newName);
-        return s;
-      });
+      if (activeChatId === chatId) setActivePdfName(newName);
     },
     [pdfLibrary, activePdfName],
   );
@@ -695,7 +725,8 @@ function ChatContent() {
   );
 
   const handleSaveToPage = useCallback(
-    (result: SaveResult) => {
+    (result: SaveResult, contentOverride?: string) => {
+      const content = contentOverride ?? saveToPageContent;
       const now = Date.now();
       let next = [...treeNodes];
       if (result.mode === "new-folder-page") {
@@ -718,7 +749,7 @@ function ChatContent() {
             parentId: folderId,
             order: 0,
             createdAt: now,
-            content: saveToPageContent,
+            content,
             updatedAt: now,
           },
         ];
@@ -733,14 +764,14 @@ function ChatContent() {
             parentId: result.parentId,
             order: nextOrder(next, result.parentId),
             createdAt: now,
-            content: saveToPageContent,
+            content,
             updatedAt: now,
           },
         ];
       } else {
         const target = next.find((n) => n.id === result.nodeId);
         if (target) {
-          const appended = (target.content ?? "") + "\n\n" + saveToPageContent;
+          const appended = (target.content ?? "") + "\n\n" + content;
           next = next.map((n) =>
             n.id === result.nodeId
               ? { ...n, content: appended, updatedAt: now }
@@ -806,24 +837,24 @@ function ChatContent() {
             (data.index_status as NonNullable<PdfMeta["indexStatus"]>) ??
               "pending",
           );
-          pdfIdMap.current.set(file.name, data.id);
+          pdfIdMap.current.set(chatId, data.id);
           setPdfServerId(data.id);
-          setPdfLibrary(getLibraryMeta().sort((a, b) => a.addedAt - b.addedAt));
+          setPdfLibrary(sortByOrder(getLibraryMeta()));
         }
       })
       .catch(() => {});
 
     // Open the PDF immediately
-    if (!pdfIdMap.current.has(file.name)) {
-      pdfIdMap.current.set(file.name, file.name);
+    if (!pdfIdMap.current.has(chatId)) {
+      pdfIdMap.current.set(chatId, chatId);
     }
     setOpenFile(file);
     setActivePdfName(file.name);
     setActiveChatId(chatId);
     setSelectedPageNode(null);
     setViewMode("both");
-    setVisitedPdfs((prev) => new Set([...prev, file.name]));
-    setPdfLibrary(getLibraryMeta().sort((a, b) => a.addedAt - b.addedAt));
+    setVisitedChatIds((prev) => new Set([...prev, chatId]));
+    setPdfLibrary(sortByOrder(getLibraryMeta()));
   }, []);
 
   const handleLandingDrop = useCallback(
@@ -870,7 +901,7 @@ function ChatContent() {
     const chatId = meta.chatId ?? generateChatId();
     if (!meta.chatId) {
       upsertLibraryMeta(new File([], meta.name), chatId);
-      setPdfLibrary(getLibraryMeta().sort((a, b) => a.addedAt - b.addedAt));
+      setPdfLibrary(sortByOrder(getLibraryMeta()));
     }
 
     // Try IDB first (fast, offline)
@@ -893,15 +924,16 @@ function ChatContent() {
     }
 
     if (!f) return;
-    if (!pdfIdMap.current.has(meta.name)) {
-      pdfIdMap.current.set(meta.name, `${meta.pdfServerId ?? meta.name}`);
+    if (!pdfIdMap.current.has(chatId)) {
+      pdfIdMap.current.set(chatId, `${meta.pdfServerId ?? chatId}`);
     }
     setOpenFile(f);
     setActivePdfName(meta.name);
     setActiveChatId(chatId);
+    setPdfServerId(meta.pdfServerId ?? null);
     setSelectedPageNode(null);
     setViewMode("both");
-    setVisitedPdfs((prev) => new Set([...prev, meta.name]));
+    setVisitedChatIds((prev) => new Set([...prev, chatId]));
     localStorage.setItem(LIBRARY_CURRENT_KEY, chatId);
   };
 
@@ -911,7 +943,7 @@ function ChatContent() {
     // Local cleanup
     await deletePdfFromLibrary(chatId);
     const updated = removeLibraryMeta(chatId);
-    setPdfLibrary(updated.sort((a, b) => a.addedAt - b.addedAt));
+    setPdfLibrary(sortByOrder(updated));
 
     // Server cleanup (fire-and-forget)
     if (meta?.pdfServerId) {
@@ -921,7 +953,7 @@ function ChatContent() {
     }
 
     if (meta && activeChatId === chatId) {
-      const sorted = updated.sort((a, b) => a.addedAt - b.addedAt);
+      const sorted = sortByOrder(updated);
       if (sorted.length > 0) {
         handleSelectPdf(sorted[0]);
       } else {
@@ -932,13 +964,12 @@ function ChatContent() {
         localStorage.removeItem(LIBRARY_CURRENT_KEY);
       }
     }
-    if (meta) {
-      setVisitedPdfs((prev) => {
-        const s = new Set(prev);
-        s.delete(meta.name);
-        return s;
-      });
-    }
+    setVisitedChatIds((prev) => {
+      const s = new Set(prev);
+      s.delete(chatId);
+      return s;
+    });
+    pdfIdMap.current.delete(chatId);
     setConfirmDeletePdf(null);
   };
 
@@ -958,28 +989,12 @@ function ChatContent() {
       m.chatId === chatId ? { ...m, name: newName } : m,
     );
     localStorage.setItem(LIBRARY_META_KEY, JSON.stringify(updated));
-    setPdfLibrary(updated.sort((a, b) => a.addedAt - b.addedAt));
-
-    // Update pdfIdMap key if this PDF was visited
-    const oldPdfId = pdfIdMap.current.get(meta.name);
-    if (oldPdfId) {
-      pdfIdMap.current.delete(meta.name);
-      pdfIdMap.current.set(newName, oldPdfId);
-    }
+    setPdfLibrary(sortByOrder(updated));
 
     // Update activePdfName if this is the active PDF
     if (activeChatId === meta.chatId) {
       setActivePdfName(newName);
     }
-
-    // Update visitedPdfs
-    setVisitedPdfs((prev) => {
-      if (!prev.has(meta.name)) return prev;
-      const s = new Set(prev);
-      s.delete(meta.name);
-      s.add(newName);
-      return s;
-    });
 
     setRenamingPdf(null);
   };
@@ -1009,31 +1024,61 @@ function ChatContent() {
 
     // Force ChatPanel remount to clear local messages
     setChatResetKey((k) => k + 1);
-    // Remove from visitedPdfs and re-add to force fresh mount
-    if (meta) {
-      setVisitedPdfs((prev) => {
-        const s = new Set(prev);
-        s.delete(meta.name);
-        return s;
-      });
-      // Re-add after a tick so ChatPanel remounts fresh
-      setTimeout(() => {
-        setVisitedPdfs((prev) => new Set([...prev, meta.name]));
-      }, 0);
-    }
+    // Remove from visitedChatIds and re-add to force fresh mount
+    setVisitedChatIds((prev) => {
+      const s = new Set(prev);
+      s.delete(chatId);
+      return s;
+    });
+    // Re-add after a tick so ChatPanel remounts fresh
+    setTimeout(() => {
+      setVisitedChatIds((prev) => new Set([...prev, chatId]));
+    }, 0);
     setConfirmResetPdf(null);
   };
 
   const handleDropPdfToFolder = (chatId: string, folderId: string) => {
     setLibraryMetaFolderId(chatId, folderId);
-    setPdfLibrary(getLibraryMeta().sort((a, b) => a.addedAt - b.addedAt));
+    setPdfLibrary(sortByOrder(getLibraryMeta()));
   };
 
   const handleRemovePdfFromFolder = (chatId: string) => {
     setLibraryMetaFolderId(chatId, null);
-    setPdfLibrary(getLibraryMeta().sort((a, b) => a.addedAt - b.addedAt));
+    setPdfLibrary(sortByOrder(getLibraryMeta()));
   };
 
+  const handleReorderPdf = useCallback(
+    (draggedChatId: string, targetChatId: string, position: "before" | "after") => {
+      if (draggedChatId === targetChatId) return;
+      setPdfLibrary((prev) => {
+        const draggedMeta = prev.find((m) => m.chatId === draggedChatId);
+        const targetMeta = prev.find((m) => m.chatId === targetChatId);
+        if (!draggedMeta || !targetMeta) return prev;
+
+        const folderId = targetMeta.folderId ?? null;
+        const group = prev.filter((m) => (m.folderId ?? null) === folderId);
+        const without = group.filter((m) => m.chatId !== draggedChatId);
+        const targetIdx = without.findIndex((m) => m.chatId === targetChatId);
+        const insertIdx = position === "before" ? targetIdx : targetIdx + 1;
+        without.splice(insertIdx, 0, { ...draggedMeta, folderId });
+
+        const updates = without.map((m, i) => ({ chatId: m.chatId!, sortOrder: i }));
+        setLibraryMetaSortOrders(updates);
+        if ((draggedMeta.folderId ?? null) !== folderId) {
+          setLibraryMetaFolderId(draggedChatId, folderId);
+        }
+        return sortByOrder(getLibraryMeta());
+      });
+    },
+    [],
+  );
+
+  const handleToggleBookmark = useCallback((chatId: string) => {
+    toggleLibraryMetaBookmark(chatId);
+    setPdfLibrary(sortByOrder(getLibraryMeta()));
+  }, []);
+
+  const bookmarkedPdfs = pdfLibrary.filter((m) => m.bookmarked);
   const ungroupedPdfs = pdfLibrary.filter((m) => !m.folderId);
 
   const showPdf =
@@ -1117,13 +1162,59 @@ function ChatContent() {
           </button>
         </div>
 
-        {/* Center — current document/unit name */}
-        <div className="flex-1 flex justify-center min-w-0 px-4">
-          <span className="text-sm font-medium text-gray-700 truncate max-w-xs">
-            {selectedPageNode
-              ? selectedPageNode.name
-              : (activePdfName ?? "PDF를 선택하세요")}
-          </span>
+        {/* Center — current document/unit name (double-click to rename) */}
+        <div className="flex-1 flex items-center justify-center gap-1.5 min-w-0 px-4">
+          {activeChatId && !selectedPageNode && (
+            <button
+              onClick={() => handleToggleBookmark(activeChatId)}
+              title={pdfLibrary.find((m) => m.chatId === activeChatId)?.bookmarked ? "북마크 해제" : "북마크"}
+              className="p-1 rounded transition-colors hover:bg-gray-100 shrink-0"
+            >
+              <svg viewBox="0 0 24 24"
+                fill={pdfLibrary.find((m) => m.chatId === activeChatId)?.bookmarked ? "currentColor" : "none"}
+                stroke="currentColor" strokeWidth={2}
+                className={`w-3.5 h-3.5 ${pdfLibrary.find((m) => m.chatId === activeChatId)?.bookmarked ? "text-amber-400" : "text-gray-400"}`}
+              >
+                <path d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
+              </svg>
+            </button>
+          )}
+          {isRenamingTitle && activeChatId ? (
+            <input
+              ref={renameTitleRef}
+              value={renameDraft}
+              onChange={(e) => setRenameDraft(e.target.value)}
+              onBlur={() => {
+                const trimmed = renameDraft.trim();
+                if (trimmed && trimmed !== activePdfName) {
+                  handleRenamePdfDirect(activeChatId, trimmed);
+                }
+                setIsRenamingTitle(false);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                if (e.key === "Escape") { setIsRenamingTitle(false); }
+              }}
+              className="text-sm font-medium text-gray-700 text-center bg-transparent border-b border-blue-400 outline-none max-w-xs w-full"
+            />
+          ) : (
+            <span
+              className={`text-sm font-medium text-gray-700 truncate max-w-xs ${activeChatId && !selectedPageNode ? "cursor-text hover:text-blue-600 transition-colors" : ""}`}
+              onDoubleClick={() => {
+                if (!activeChatId || selectedPageNode) return;
+                setRenameDraft(activePdfName ?? "");
+                setIsRenamingTitle(true);
+                requestAnimationFrame(() => {
+                  renameTitleRef.current?.select();
+                });
+              }}
+              title={activeChatId && !selectedPageNode ? "더블클릭하여 이름 변경" : undefined}
+            >
+              {selectedPageNode
+                ? selectedPageNode.name
+                : (activePdfName ?? "PDF를 선택하세요")}
+            </span>
+          )}
         </div>
 
         {/* Right — view toggle + user */}
@@ -1350,6 +1441,50 @@ function ChatContent() {
             className="bg-gray-50 border-r border-gray-200 flex flex-col shrink-0 overflow-hidden relative"
             style={{ width: sidebarWidth }}
           >
+            {/* ── Bookmarks section (collapsible, above split) ── */}
+            {bookmarkedPdfs.length > 0 && (
+              <div className="px-1.5 pt-2 pb-1 shrink-0">
+                <div className="flex items-center gap-1 px-1.5 py-1 text-sm text-gray-700 font-medium">
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+                    <path d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
+                  </svg>
+                  Bookmarks
+                </div>
+                <div className="space-y-0.5">
+                  {bookmarkedPdfs.map((meta) => (
+                    <div
+                      key={`bm-${meta.chatId}`}
+                      className={`group flex items-center rounded-md transition-colors ${
+                        activeChatId === meta.chatId ? "bg-gray-200" : "hover:bg-gray-100"
+                      }`}
+                    >
+                      <button
+                        onClick={() => handleSelectPdf(meta)}
+                        className={`flex-1 min-w-0 flex items-center gap-1.5 px-1.5 py-1.5 text-xs truncate ${
+                          activeChatId === meta.chatId ? "text-gray-900 font-medium" : "text-gray-500 group-hover:text-gray-800"
+                        }`}
+                      >
+                        <svg className="w-3 h-3 text-amber-400 shrink-0" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+                          <path d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
+                        </svg>
+                        <span className="truncate">{meta.name}</span>
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleToggleBookmark(meta.chatId!); }}
+                        title="북마크 해제"
+                        className="opacity-0 group-hover:opacity-100 p-1 mr-0.5 rounded text-amber-400 hover:text-gray-400 hover:bg-gray-200 transition-all shrink-0"
+                      >
+                        <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+                          <path d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
+                        </svg>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <div className="h-px bg-gray-200 mx-1.5 mt-1.5" />
+              </div>
+            )}
+
             {/* ── Chats + Folders split container ── */}
             <div
               ref={splitContainerRef}
@@ -1385,13 +1520,39 @@ function ChatContent() {
                     ungroupedPdfs.map((meta) => (
                       <div
                         key={meta.chatId ?? meta.name}
+                        className="relative"
+                        onDragOver={(e) => {
+                          if (!draggingChatIdRef.current || draggingChatIdRef.current === meta.chatId) return;
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = "move";
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          const y = e.clientY - rect.top;
+                          setDropIndicator({ chatId: meta.chatId!, position: y < rect.height / 2 ? "before" : "after" });
+                        }}
+                        onDragLeave={(e) => {
+                          if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropIndicator(null);
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          const draggedId = e.dataTransfer.getData(PDF_DRAG_TYPE);
+                          if (draggedId && dropIndicator && dropIndicator.chatId === meta.chatId) {
+                            handleReorderPdf(draggedId, meta.chatId!, dropIndicator.position);
+                          }
+                          setDropIndicator(null);
+                        }}
+                      >
+                        {dropIndicator != null && dropIndicator.chatId === meta.chatId && dropIndicator.position === "before" && (
+                          <div className="absolute top-0 left-2 right-2 h-0.5 bg-blue-500 rounded-full z-10" />
+                        )}
+                      <div
                         draggable
                         onDragStart={(e) => {
                           e.dataTransfer.setData(PDF_DRAG_TYPE, meta.chatId!);
                           e.dataTransfer.effectAllowed = "move";
+                          draggingChatIdRef.current = meta.chatId!;
                           setIsDraggingItem(true);
                         }}
-                        onDragEnd={() => setIsDraggingItem(false)}
+                        onDragEnd={() => { setIsDraggingItem(false); draggingChatIdRef.current = null; setDropIndicator(null); }}
                         className={`group flex items-center rounded-md transition-colors cursor-grab active:cursor-grabbing ${
                           activeChatId === meta.chatId
                             ? "bg-gray-200"
@@ -1498,6 +1659,19 @@ function ChatContent() {
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
+                                  handleToggleBookmark(meta.chatId!);
+                                  setContextMenuPdf(null);
+                                }}
+                                className="w-full flex items-center gap-2 px-3 py-2 text-gray-700 hover:bg-gray-50 transition-colors"
+                              >
+                                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill={meta.bookmarked ? "currentColor" : "none"} stroke="currentColor" strokeWidth={2}>
+                                  <path d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
+                                </svg>
+                                {meta.bookmarked ? "북마크 해제" : "북마크"}
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
                                   setRenameValue(meta.name);
                                   setRenamingPdf(meta.chatId!);
                                   setContextMenuPdf(null);
@@ -1570,6 +1744,10 @@ function ChatContent() {
                           )}
                         </div>
                       </div>
+                        {dropIndicator != null && dropIndicator.chatId === meta.chatId && dropIndicator.position === "after" && (
+                          <div className="absolute bottom-0 left-2 right-2 h-0.5 bg-blue-500 rounded-full z-10" />
+                        )}
+                      </div>
                     ))
                   )}
                 </div>
@@ -1578,9 +1756,10 @@ function ChatContent() {
               {/* ── Draggable divider ── */}
               <div
                 onMouseDown={onSplitDividerMouseDown}
-                className="shrink-0 cursor-row-resize mx-2 py-1.5"
+                onDoubleClick={() => { setChatsSplitPct(50); chatsSplitPctRef.current = 50; localStorage.setItem("lingua_sidebar_split", "50"); }}
+                className="group/split shrink-0 cursor-row-resize mx-2 py-1.5"
               >
-                <div className="h-px bg-gray-200" />
+                <div className={`h-px transition-colors ${isSplitDragging ? "bg-blue-400" : "bg-gray-200 group-hover/split:bg-blue-300"}`} />
               </div>
 
               {/* ── Folders section ── */}
@@ -1646,7 +1825,7 @@ function ChatContent() {
                       onMoveNode={handleMoveNode}
                       onRenameNode={handleRenameNode}
                       pdfLibrary={pdfLibrary}
-                      activePdfName={activePdfName}
+                      activeChatId={activeChatId}
                       isDraggingItem={isDraggingItem}
                       onDragActiveChange={setIsDraggingItem}
                       onSelectPdf={handleSelectPdf}
@@ -1655,6 +1834,8 @@ function ChatContent() {
                       onRenamePdf={handleRenamePdfDirect}
                       onResetPdf={(chatId) => setConfirmResetPdf(chatId)}
                       onDeletePdf={(chatId) => setConfirmDeletePdf(chatId)}
+                      onReorderPdf={handleReorderPdf}
+                      onReorderNode={handleReorderNode}
                     />
                   )}
                 </div>
@@ -1906,22 +2087,24 @@ function ChatContent() {
                     : undefined
                 }
               >
-                {/* Persistent chat panels — one per visited PDF */}
+                {/* Persistent chat panels — one per visited PDF (keyed by chatId) */}
                 {initialized &&
-                  [...visitedPdfs].map((pdfName) => {
-                    const pdfId = pdfIdMap.current.get(pdfName) ?? pdfName;
+                  [...visitedChatIds].map((vcId) => {
+                    const pdfId = pdfIdMap.current.get(vcId) ?? vcId;
+                    const vcMeta = pdfLibrary.find((m) => m.chatId === vcId);
+                    const vcName = vcMeta?.name ?? vcId;
                     return (
                       <div
-                        key={`${pdfName}-${chatResetKey}`}
+                        key={`${vcId}-${chatResetKey}`}
                         className="flex-1 flex flex-col overflow-hidden"
                         style={{
                           display:
-                            pdfName === activePdfName ? undefined : "none",
+                            vcId === activeChatId ? undefined : "none",
                         }}
                       >
                         <ChatPanel
                           pdfId={pdfId}
-                          pdfName={pdfName}
+                          pdfName={vcName}
                           injectText={injectText}
                           getPageText={async () =>
                             pdfViewerRef.current?.getPageText() ?? null
@@ -1931,7 +2114,7 @@ function ChatContent() {
                           }
                           hasPdfContext={hasPdfContext}
                           speak={speak}
-                          onSaveToPage={handleOpenSaveToPage}
+                          onSummarySaved={(content) => setSummarySaveContent(content)}
                         />
                       </div>
                     );
@@ -2122,14 +2305,14 @@ function ChatContent() {
                   upsertLibraryMeta(f, newChatId);
                   savePdfToLibrary(f, newChatId).catch(() => {});
                   localStorage.setItem(LIBRARY_CURRENT_KEY, newChatId);
-                  // Fix pdfId before adding to visitedPdfs (use filename if no pdfServerId yet)
+                  // Fix pdfId before adding to visitedChatIds
                   const existingMeta = getLibraryMeta().find(
                     (m) => m.chatId === newChatId,
                   );
-                  if (!pdfIdMap.current.has(f.name)) {
+                  if (!pdfIdMap.current.has(newChatId)) {
                     pdfIdMap.current.set(
-                      f.name,
-                      `${existingMeta?.pdfServerId ?? f.name}`,
+                      newChatId,
+                      `${existingMeta?.pdfServerId ?? newChatId}`,
                     );
                   }
                   setOpenFile(f);
@@ -2138,9 +2321,9 @@ function ChatContent() {
                   setPdfServerId(null);
                   setSelectedPageNode(null);
                   setViewMode("both");
-                  setVisitedPdfs((prev) => new Set([...prev, f.name]));
+                  setVisitedChatIds((prev) => new Set([...prev, newChatId]));
                   setPdfLibrary(
-                    getLibraryMeta().sort((a, b) => a.addedAt - b.addedAt),
+                    sortByOrder(getLibraryMeta()),
                   );
                   setShowPdfModal(false);
                   e.target.value = "";
@@ -2160,12 +2343,10 @@ function ChatContent() {
                             >) ?? "pending",
                           );
                           // Update pdfId map so current session uses the stable uuid-based key
-                          pdfIdMap.current.set(f.name, `${data.id}`);
+                          pdfIdMap.current.set(newChatId, `${data.id}`);
                           setPdfServerId(data.id);
                           setPdfLibrary(
-                            getLibraryMeta().sort(
-                              (a, b) => a.addedAt - b.addedAt,
-                            ),
+                            sortByOrder(getLibraryMeta()),
                           );
                         }
                       })
@@ -2227,7 +2408,7 @@ function ChatContent() {
                           setActiveChatId(meta.chatId ?? null);
                           setSelectedPageNode(null);
                           setViewMode("both");
-                          setVisitedPdfs(
+                          setVisitedChatIds(
                             (prev) => new Set([...prev, meta.name]),
                           );
                           setShowPdfModal(false);
@@ -2275,9 +2456,9 @@ function ChatContent() {
                           const updated = meta.chatId
                             ? removeLibraryMeta(meta.chatId)
                             : getLibraryMeta();
-                          setModalLib(updated);
+                          setModalLib(sortByOrder(updated));
                           setPdfLibrary(
-                            updated.sort((a, b) => a.addedAt - b.addedAt),
+                            sortByOrder(updated),
                           );
                         }}
                         title="목록에서 삭제"
@@ -2476,6 +2657,29 @@ function ChatContent() {
             setSaveToPageContent("");
           }}
           onSave={handleSaveToPage}
+        />
+      )}
+
+      {/* ── Summary save modal (tabbed: note + page) ── */}
+      {summarySaveContent && (
+        <SummarySaveModal
+          content={summarySaveContent}
+          nodes={treeNodes}
+          hasNoteOption={!!pdfViewerRef.current?.getPdfId()}
+          onSaveToNote={async (text) => {
+            await pdfViewerRef.current?.addNote(text);
+            setSummarySaveContent(null);
+          }}
+          onSaveToPage={(result) => {
+            const saveResult: SaveResult = result.mode === "new-folder-page"
+              ? { mode: result.mode, folderName: result.folderName, pageName: result.pageName }
+              : result.mode === "new-page"
+              ? { mode: result.mode, parentId: result.parentId, pageName: result.pageName }
+              : { mode: "append", nodeId: result.nodeId };
+            handleSaveToPage(saveResult, result.content);
+            setSummarySaveContent(null);
+          }}
+          onClose={() => setSummarySaveContent(null)}
         />
       )}
 

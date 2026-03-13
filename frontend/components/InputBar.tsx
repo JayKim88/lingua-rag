@@ -10,8 +10,6 @@ interface InputBarProps {
   injectText?: { text: string; id: number };
   hasPageContext?: boolean;
   onSummary?: () => void;
-  onMemo?: () => void;
-  showSummary?: boolean;
   disabled?: boolean;
   /** Called when user interacts with the input while disabled (e.g. to show paywall) */
   onDisabledClick?: () => void;
@@ -25,8 +23,6 @@ export default function InputBar({
   injectText,
   hasPageContext,
   onSummary,
-  onMemo,
-  showSummary,
   disabled,
   onDisabledClick,
 }: InputBarProps) {
@@ -72,7 +68,7 @@ export default function InputBar({
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
   };
 
-  const showActionButtons = !showSummary && (hasPageContext || onSummary || onMemo);
+  const showActionButtons = hasPageContext || onSummary;
 
   return (
     <div className="bg-white px-3 py-3">
@@ -135,28 +131,6 @@ export default function InputBar({
                   />
                 </svg>
                 요약
-              </button>
-            )}
-            {onMemo && (
-              <button
-                onClick={onMemo}
-                title="직접 메모를 작성합니다"
-                className="inline-flex items-center gap-1 text-xs text-gray-500 bg-gray-100 hover:bg-gray-200 hover:text-gray-700 px-2.5 py-1 rounded-full transition-colors font-medium"
-              >
-                <svg
-                  className="w-3 h-3"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                  strokeWidth={2}
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M15.232 5.232l3.536 3.536M9 13l6.586-6.586a2 2 0 012.828 2.828L11.828 15.828a2 2 0 01-1.414.586H8v-2.414a2 2 0 01.586-1.414z"
-                  />
-                </svg>
-                메모
               </button>
             )}
           </div>

@@ -377,15 +377,25 @@ class AnnotationRepository:
         return [_record_to_dict(r) for r in records]
 
     async def create(
-        self, user_id: UUID, pdf_id: str, page_num: int, x_pct: float, y_pct: float, text: str, color: str
+        self,
+        user_id: UUID,
+        pdf_id: str,
+        page_num: int,
+        x_pct: float,
+        y_pct: float,
+        text: str,
+        color: str,
+        ann_type: str = "sticky",
+        highlighted_text: str | None = None,
     ) -> dict:
         pool = get_pool()
         async with pool.acquire() as conn:
             record = await conn.fetchrow(
                 """
                 INSERT INTO pdf_annotations
-                  (id, user_id, pdf_id, page_num, x_pct, y_pct, text, color, created_at)
-                VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, NOW())
+                  (id, user_id, pdf_id, page_num, x_pct, y_pct, text, color,
+                   type, highlighted_text, created_at)
+                VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
                 RETURNING *
                 """,
                 user_id,
@@ -395,6 +405,8 @@ class AnnotationRepository:
                 y_pct,
                 text,
                 color,
+                ann_type,
+                highlighted_text,
             )
         return _record_to_dict(record)
 
@@ -445,6 +457,63 @@ class AnnotationRepository:
                 ann_id,
                 user_id,
             )
+        return result != "DELETE 0"
+
+
+class VocabularyRepository:
+    """CRUD for vocabulary table."""
+
+    async def list_all(self, user_id: UUID, pdf_id: str) -> list[dict]:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            records = await conn.fetch(
+                "SELECT * FROM vocabulary WHERE user_id = $1 AND pdf_id = $2 ORDER BY page_num ASC, created_at ASC",
+                user_id, pdf_id,
+            )
+        return [_record_to_dict(r) for r in records]
+
+    async def list_by_page(self, user_id: UUID, pdf_id: str, page_num: int) -> list[dict]:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            records = await conn.fetch(
+                "SELECT * FROM vocabulary WHERE user_id = $1 AND pdf_id = $2 AND page_num = $3 ORDER BY created_at ASC",
+                user_id, pdf_id, page_num,
+            )
+        return [_record_to_dict(r) for r in records]
+
+    async def create(self, user_id: UUID, pdf_id: str, page_num: int, word: str, context: str | None, meaning: str | None, language: str | None) -> dict:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            record = await conn.fetchrow(
+                """INSERT INTO vocabulary (id, user_id, pdf_id, page_num, word, context, meaning, language, created_at)
+                   VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, NOW()) RETURNING *""",
+                user_id, pdf_id, page_num, word, context, meaning, language,
+            )
+        return _record_to_dict(record)
+
+    async def update(self, user_id: UUID, vocab_id: UUID, word: str | None = None, meaning: str | None = None) -> dict | None:
+        sets: list[str] = []
+        params: list = []
+        idx = 1
+        if word is not None:
+            sets.append(f"word = ${idx}"); params.append(word); idx += 1
+        if meaning is not None:
+            sets.append(f"meaning = ${idx}"); params.append(meaning); idx += 1
+        if not sets:
+            return None
+        params.extend([vocab_id, user_id])
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            record = await conn.fetchrow(
+                f"UPDATE vocabulary SET {', '.join(sets)} WHERE id = ${idx} AND user_id = ${idx + 1} RETURNING *",
+                *params,
+            )
+        return _record_to_dict(record) if record else None
+
+    async def delete(self, user_id: UUID, vocab_id: UUID) -> bool:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute("DELETE FROM vocabulary WHERE id = $1 AND user_id = $2", vocab_id, user_id)
         return result != "DELETE 0"
 
 

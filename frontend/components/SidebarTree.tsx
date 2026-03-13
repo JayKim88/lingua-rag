@@ -75,20 +75,25 @@ function useClickOutside(ref: React.RefObject<HTMLDivElement | null>, open: bool
 interface FolderPdfItemProps {
   meta: PdfMeta;
   depth: number;
-  activePdfName: string | null;
+  activeChatId: string | null;
   onSelectPdf: (meta: PdfMeta) => void;
   onRemoveFromFolder: (chatId: string) => void;
   onRenamePdf: (chatId: string, newName: string) => void;
   onResetPdf: (chatId: string) => void;
   onDeletePdf: (chatId: string) => void;
   onDragActiveChange: (active: boolean) => void;
+  onReorderPdf: (draggedChatId: string, targetChatId: string, position: "before" | "after") => void;
+  draggingChatIdRef: React.RefObject<string | null>;
+  dropIndicator: { chatId: string; position: "before" | "after" } | null;
+  onDropIndicatorChange: (v: { chatId: string; position: "before" | "after" } | null) => void;
 }
 
 function FolderPdfItem({
-  meta, depth, activePdfName, onSelectPdf, onRemoveFromFolder,
+  meta, depth, activeChatId, onSelectPdf, onRemoveFromFolder,
   onRenamePdf, onResetPdf, onDeletePdf, onDragActiveChange,
+  onReorderPdf, draggingChatIdRef, dropIndicator, onDropIndicatorChange,
 }: FolderPdfItemProps) {
-  const isActive = activePdfName === meta.name;
+  const isActive = activeChatId === meta.chatId;
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
@@ -106,14 +111,40 @@ function FolderPdfItem({
 
   return (
     <div
+      className="relative"
+      onDragOver={(e) => {
+        if (!draggingChatIdRef.current || draggingChatIdRef.current === meta.chatId) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        const rect = e.currentTarget.getBoundingClientRect();
+        const y = e.clientY - rect.top;
+        onDropIndicatorChange({ chatId: meta.chatId!, position: y < rect.height / 2 ? "before" : "after" });
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node)) onDropIndicatorChange(null);
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        const draggedId = e.dataTransfer.getData(PDF_DRAG_TYPE);
+        if (draggedId && dropIndicator && dropIndicator.chatId === meta.chatId) {
+          onReorderPdf(draggedId, meta.chatId!, dropIndicator.position);
+        }
+        onDropIndicatorChange(null);
+      }}
+    >
+      {dropIndicator != null && dropIndicator.chatId === meta.chatId && dropIndicator.position === "before" && (
+        <div className="absolute top-0 left-2 right-2 h-0.5 bg-blue-500 rounded-full z-10" />
+      )}
+    <div
       draggable={!renaming}
       onDragStart={(e) => {
         if (renaming) { e.preventDefault(); return; }
         e.dataTransfer.setData(PDF_DRAG_TYPE, meta.chatId!);
         e.dataTransfer.effectAllowed = "move";
+        draggingChatIdRef.current = meta.chatId!;
         onDragActiveChange(true);
       }}
-      onDragEnd={() => onDragActiveChange(false)}
+      onDragEnd={() => { onDragActiveChange(false); draggingChatIdRef.current = null; onDropIndicatorChange(null); }}
       onClick={() => { if (!renaming) onSelectPdf(meta); }}
       style={{ paddingLeft: 8 + depth * 12 }}
       className={`flex items-center gap-1 pr-1 h-8 group rounded-md select-none transition-colors ${
@@ -191,6 +222,10 @@ function FolderPdfItem({
         </div>
       )}
     </div>
+      {dropIndicator != null && dropIndicator.chatId === meta.chatId && dropIndicator.position === "after" && (
+        <div className="absolute bottom-0 left-2 right-2 h-0.5 bg-blue-500 rounded-full z-10" />
+      )}
+    </div>
   );
 }
 
@@ -208,7 +243,7 @@ interface TreeNodeRowProps {
   onRenameNode: (nodeId: string, newName: string) => void;
   // PDF-in-folder support
   folderPdfs: Map<string, PdfMeta[]>;
-  activePdfName: string | null;
+  activeChatId: string | null;
   onSelectPdf: (meta: PdfMeta) => void;
   onDropPdf: (chatId: string, folderId: string) => void;
   onRemoveFromFolder: (chatId: string) => void;
@@ -217,12 +252,22 @@ interface TreeNodeRowProps {
   onDeletePdf: (chatId: string) => void;
   isDraggingItem: boolean;
   onDragActiveChange: (active: boolean) => void;
+  onReorderPdf: (draggedChatId: string, targetChatId: string, position: "before" | "after") => void;
+  draggingChatIdRef: React.RefObject<string | null>;
+  dropIndicator: { chatId: string; position: "before" | "after" } | null;
+  onDropIndicatorChange: (v: { chatId: string; position: "before" | "after" } | null) => void;
+  onReorderNode: (draggedId: string, targetId: string, position: "before" | "after") => void;
+  draggingNodeIdRef: React.RefObject<string | null>;
+  nodeDropIndicator: { nodeId: string; position: "before" | "after" } | null;
+  onNodeDropIndicatorChange: (v: { nodeId: string; position: "before" | "after" } | null) => void;
 }
 
 function TreeNodeRow({
   node, nodes, depth, selectedNodeId, onSelect, onAddNode, onDelete, onMoveNode, onRenameNode,
-  folderPdfs, activePdfName, onSelectPdf, onDropPdf, onRemoveFromFolder,
+  folderPdfs, activeChatId, onSelectPdf, onDropPdf, onRemoveFromFolder,
   onRenamePdf, onResetPdf, onDeletePdf, isDraggingItem, onDragActiveChange,
+  onReorderPdf, draggingChatIdRef, dropIndicator, onDropIndicatorChange,
+  onReorderNode, draggingNodeIdRef, nodeDropIndicator, onNodeDropIndicatorChange,
 }: TreeNodeRowProps) {
   const [expanded, setExpanded] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -250,55 +295,96 @@ function TreeNodeRow({
     e.dataTransfer.setData(NODE_DRAG_TYPE, node.id);
     e.dataTransfer.effectAllowed = "move";
     e.stopPropagation();
+    draggingNodeIdRef.current = node.id;
     onDragActiveChange(true);
   };
 
-  const handleDragEnd = () => onDragActiveChange(false);
-
-  // ── Drop target (folders accept PDF + node drops) ──
-  const handleDragOver = (e: React.DragEvent) => {
-    if (node.type !== "folder") return;
-    const hasPdf = e.dataTransfer.types.includes(PDF_DRAG_TYPE);
-    const hasNode = e.dataTransfer.types.includes(NODE_DRAG_TYPE);
-    if (!hasPdf && !hasNode) return;
-    e.preventDefault();
-    e.stopPropagation();
-    e.dataTransfer.dropEffect = "move";
-    setDragOver(true);
+  const handleDragEnd = () => {
+    onDragActiveChange(false);
+    draggingNodeIdRef.current = null;
+    onNodeDropIndicatorChange(null);
   };
 
-  const handleDragLeave = (e: React.DragEvent) => {
-    e.stopPropagation();
-    setDragOver(false);
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    setDragOver(false);
-    if (node.type !== "folder") return;
-    e.preventDefault();
-    e.stopPropagation();
-
-    // Handle PDF drop
-    const chatId = e.dataTransfer.getData(PDF_DRAG_TYPE);
-    if (chatId) {
-      onDropPdf(chatId, node.id);
-      if (!expanded) setExpanded(true);
-      return;
-    }
-
-    // Handle tree node drop
-    const nodeId = e.dataTransfer.getData(NODE_DRAG_TYPE);
-    if (nodeId && nodeId !== node.id) {
-      // Prevent dropping a folder into its own descendant
-      const descendantIds = getDescendantIds(nodes, nodeId);
-      if (descendantIds.includes(node.id)) return;
-      onMoveNode(nodeId, node.id);
-      if (!expanded) setExpanded(true);
-    }
-  };
+  // Edge zone ratio: top/bottom 25% = reorder, middle 50% = drop into folder
+  const EDGE_RATIO = 0.25;
 
   return (
     <>
+      <div
+        className="relative"
+        onDragOver={(e) => {
+          const hasPdf = e.dataTransfer.types.includes(PDF_DRAG_TYPE);
+          const hasNode = e.dataTransfer.types.includes(NODE_DRAG_TYPE);
+          if (!hasPdf && !hasNode) return;
+          e.preventDefault();
+          e.stopPropagation();
+          e.dataTransfer.dropEffect = "move";
+
+          const rect = e.currentTarget.getBoundingClientRect();
+          const y = e.clientY - rect.top;
+          const ratio = y / rect.height;
+
+          // For node reordering (only when another node is being dragged)
+          if (hasNode && draggingNodeIdRef.current && draggingNodeIdRef.current !== node.id) {
+            if (node.type === "folder" && ratio > EDGE_RATIO && ratio < 1 - EDGE_RATIO) {
+              // Middle zone of folder → drop into folder
+              onNodeDropIndicatorChange(null);
+              setDragOver(true);
+            } else {
+              // Edge zones → reorder
+              setDragOver(false);
+              onNodeDropIndicatorChange({ nodeId: node.id, position: ratio < 0.5 ? "before" : "after" });
+            }
+          } else if (hasPdf && node.type === "folder") {
+            // PDF drag → always drop into folder
+            onNodeDropIndicatorChange(null);
+            setDragOver(true);
+          }
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+            setDragOver(false);
+            onNodeDropIndicatorChange(null);
+          }
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const wasDragOver = dragOver;
+          setDragOver(false);
+
+          // Handle node reorder
+          const droppedNodeId = e.dataTransfer.getData(NODE_DRAG_TYPE);
+          if (droppedNodeId && nodeDropIndicator && nodeDropIndicator.nodeId === node.id) {
+            const descendantIds = getDescendantIds(nodes, droppedNodeId);
+            if (!descendantIds.includes(node.id)) {
+              onReorderNode(droppedNodeId, node.id, nodeDropIndicator.position);
+            }
+            onNodeDropIndicatorChange(null);
+            return;
+          }
+          onNodeDropIndicatorChange(null);
+
+          // Handle drop INTO folder (middle zone)
+          if (node.type === "folder" && wasDragOver) {
+            const chatId = e.dataTransfer.getData(PDF_DRAG_TYPE);
+            if (chatId) {
+              onDropPdf(chatId, node.id);
+              if (!expanded) setExpanded(true);
+              return;
+            }
+            if (droppedNodeId && droppedNodeId !== node.id) {
+              const descendantIds = getDescendantIds(nodes, droppedNodeId);
+              if (descendantIds.includes(node.id)) return;
+              onMoveNode(droppedNodeId, node.id);
+              if (!expanded) setExpanded(true);
+            }
+          }
+        }}
+      >
+        {nodeDropIndicator != null && nodeDropIndicator.nodeId === node.id && nodeDropIndicator.position === "before" && (
+          <div className="absolute top-0 left-2 right-2 h-0.5 bg-blue-500 rounded-full z-10" />
+        )}
       <div
         draggable={!renaming}
         onDragStart={handleDragStart}
@@ -308,9 +394,6 @@ function TreeNodeRow({
           if (node.type === "folder") setExpanded((v) => !v);
           else onSelect(node);
         }}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
         style={{ paddingLeft: 8 + depth * 12 }}
         className={`flex items-center gap-1 pr-1 h-8 group select-none transition-colors rounded-md ${
           renaming ? "cursor-text" : "cursor-grab active:cursor-grabbing"
@@ -424,6 +507,10 @@ function TreeNodeRow({
           </div>
         )}
       </div>
+        {nodeDropIndicator != null && nodeDropIndicator.nodeId === node.id && nodeDropIndicator.position === "after" && (
+          <div className="absolute bottom-0 left-2 right-2 h-0.5 bg-blue-500 rounded-full z-10" />
+        )}
+      </div>
 
       {/* Children: PDFs first (top), then tree nodes */}
       {node.type === "folder" && expanded && (
@@ -433,13 +520,17 @@ function TreeNodeRow({
               key={meta.chatId}
               meta={meta}
               depth={depth + 1}
-              activePdfName={activePdfName}
+              activeChatId={activeChatId}
               onSelectPdf={onSelectPdf}
               onRemoveFromFolder={onRemoveFromFolder}
               onRenamePdf={onRenamePdf}
               onResetPdf={onResetPdf}
               onDeletePdf={onDeletePdf}
               onDragActiveChange={onDragActiveChange}
+              onReorderPdf={onReorderPdf}
+              draggingChatIdRef={draggingChatIdRef}
+              dropIndicator={dropIndicator}
+              onDropIndicatorChange={onDropIndicatorChange}
             />
           ))}
           {children.map((child) => (
@@ -455,7 +546,7 @@ function TreeNodeRow({
               onMoveNode={onMoveNode}
               onRenameNode={onRenameNode}
               folderPdfs={folderPdfs}
-              activePdfName={activePdfName}
+              activeChatId={activeChatId}
               onSelectPdf={onSelectPdf}
               onDropPdf={onDropPdf}
               onRemoveFromFolder={onRemoveFromFolder}
@@ -464,6 +555,14 @@ function TreeNodeRow({
               onDeletePdf={onDeletePdf}
               isDraggingItem={isDraggingItem}
               onDragActiveChange={onDragActiveChange}
+              onReorderPdf={onReorderPdf}
+              draggingChatIdRef={draggingChatIdRef}
+              dropIndicator={dropIndicator}
+              onDropIndicatorChange={onDropIndicatorChange}
+              onReorderNode={onReorderNode}
+              draggingNodeIdRef={draggingNodeIdRef}
+              nodeDropIndicator={nodeDropIndicator}
+              onNodeDropIndicatorChange={onNodeDropIndicatorChange}
             />
           ))}
         </>
@@ -484,7 +583,7 @@ export interface SidebarTreeProps {
   onRenameNode: (nodeId: string, newName: string) => void;
   // PDF-in-folder support
   pdfLibrary?: PdfMeta[];
-  activePdfName?: string | null;
+  activeChatId?: string | null;
   onSelectPdf?: (meta: PdfMeta) => void;
   onDropPdf?: (chatId: string, folderId: string) => void;
   onRemoveFromFolder?: (chatId: string) => void;
@@ -493,15 +592,21 @@ export interface SidebarTreeProps {
   onDeletePdf?: (chatId: string) => void;
   isDraggingItem?: boolean;
   onDragActiveChange?: (active: boolean) => void;
+  onReorderPdf?: (draggedChatId: string, targetChatId: string, position: "before" | "after") => void;
+  onReorderNode?: (draggedId: string, targetId: string, position: "before" | "after") => void;
 }
 
 export default function SidebarTree({
   nodes, selectedNodeId, onSelect, onAddNode, onDelete, onMoveNode, onRenameNode,
-  pdfLibrary = [], activePdfName = null,
+  pdfLibrary = [], activeChatId = null,
   onSelectPdf, onDropPdf, onRemoveFromFolder, onRenamePdf, onResetPdf, onDeletePdf,
-  isDraggingItem = false, onDragActiveChange,
+  isDraggingItem = false, onDragActiveChange, onReorderPdf, onReorderNode,
 }: SidebarTreeProps) {
   const roots = getChildren(nodes, null);
+  const draggingChatIdRef = useRef<string | null>(null);
+  const draggingNodeIdRef = useRef<string | null>(null);
+  const [folderDropIndicator, setFolderDropIndicator] = useState<{ chatId: string; position: "before" | "after" } | null>(null);
+  const [nodeDropIndicator, setNodeDropIndicator] = useState<{ nodeId: string; position: "before" | "after" } | null>(null);
 
   // Group PDFs by folderId
   const folderPdfs = new Map<string, PdfMeta[]>();
@@ -536,7 +641,7 @@ export default function SidebarTree({
             onMoveNode={onMoveNode}
             onRenameNode={onRenameNode}
             folderPdfs={folderPdfs}
-            activePdfName={activePdfName}
+            activeChatId={activeChatId}
             onSelectPdf={onSelectPdf ?? noop}
             onDropPdf={onDropPdf ?? noop}
             onRemoveFromFolder={onRemoveFromFolder ?? noop}
@@ -545,6 +650,14 @@ export default function SidebarTree({
             onDeletePdf={onDeletePdf ?? noop}
             isDraggingItem={isDraggingItem}
             onDragActiveChange={onDragActiveChange ?? noop}
+            onReorderPdf={onReorderPdf ?? noop}
+            draggingChatIdRef={draggingChatIdRef}
+            dropIndicator={folderDropIndicator}
+            onDropIndicatorChange={setFolderDropIndicator}
+            onReorderNode={onReorderNode ?? noop}
+            draggingNodeIdRef={draggingNodeIdRef}
+            nodeDropIndicator={nodeDropIndicator}
+            onNodeDropIndicatorChange={setNodeDropIndicator}
           />
         ))
       )}

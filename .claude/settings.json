@@ -19,10 +19,22 @@
       "Bash(find /Users/jaykim/Documents/Projects/lingua-rag/frontend/app/api -name *pdfs* -type f)",
       "Bash(grep -r \"language.*modal\\\\|modal.*language\\\\|showLanguageModal\\\\|pendingLang\\\\|langModal\" /Users/jaykim/Documents/Projects/lingua-rag/frontend/components --include=*.tsx --include=*.ts)",
       "Read(//Users/jaykim/.claude/skills/wrap-up/**)",
-      "Read(//Users/jaykim/Documents/Projects/claude-ai-engineering/plugins/wrap-up/skills/wrap-up/**)"
+      "Read(//Users/jaykim/Documents/Projects/claude-ai-engineering/plugins/wrap-up/skills/wrap-up/**)",
+      "Read(//Users/jaykim/Documents/Projects/ai-learning/blog/src/content/logs/**)",
+      "Read(//class AnnotationRepository/**)",
+      "Bash(.venv/bin/python -c \":*)",
+      "Bash(find /Users/jaykim/Documents/Projects/lingua-rag/frontend -type f -name *settings* -o -name *language* -o -name *locale*)",
+      "Bash(find /Users/jaykim/Documents/Projects/lingua-rag/backend -name *language* -o -name *locale* -o -name *i18n*)",
+      "Bash(grep -i \"language\" /Users/jaykim/Documents/Projects/lingua-rag/backend/migrations/*.sql)",
+      "Bash(grep -r \"className=\\\\|placeholder=\\\\|title=\\\\|aria-label=\" /Users/jaykim/Documents/Projects/lingua-rag/frontend/components/*.tsx)",
+      "Bash(grep -A 30 \"TTS_LANGUAGES\\\\|export.*LANGUAGES\" /Users/jaykim/Documents/Projects/lingua-rag/frontend/lib/*.ts)",
+      "Bash(wc -l /Users/jaykim/Documents/Projects/lingua-rag/frontend/app/chat/page.tsx /Users/jaykim/Documents/Projects/lingua-rag/frontend/app/chat/[id]/page.tsx)",
+      "Bash(git diff:*)"
     ],
     "additionalDirectories": [
-      "/Users/jaykim/Documents/Projects/lingua-rag/frontend/app/api/guest/pdfs/[id]"
+      "/Users/jaykim/Documents/Projects/lingua-rag/frontend/app/api/guest/pdfs/[id]",
+      "/Users/jaykim/Documents/Projects/ai-learning/blog/src/content/logs",
+      "/Users/jaykim/Documents/Projects/lingua-rag/frontend/app/api/pdfs/[id]/vocabulary"
     ]
   }
 }
